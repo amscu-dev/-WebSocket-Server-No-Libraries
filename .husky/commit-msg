@@ -1,0 +1,2 @@
+echo "============= LINTING COMMIT MESSAGE ============="
+npx commitlint --edit $1
