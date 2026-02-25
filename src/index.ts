@@ -6,17 +6,24 @@ import { performance } from "node:perf_hooks";
 import chalk from "chalk";
 
 import CONFIG from "@/config/app.config";
-import * as CONSTANTS from "@/libs/custom_lib/websocket.constants";
+import * as CONSTANTS from "@/libs/custom_lib/constants/constants";
 
+import sendUpgradeErrorResponse from "./libs/custom_lib/sendUpgradeErrorResponse";
+import UpgradeValidatorFactory from "./libs/custom_lib/validateHttpHandshake";
 import handleProcessErrors from "./utils/handleProcessErrors";
 
 console.log(
   chalk.green.bold("[ NODE ] Finished loading all files in index.ts"),
 );
 
+const upgradeValidator = UpgradeValidatorFactory.createValidator(
+  CONSTANTS.upgradeConfig,
+);
+
 // create a HTTP wev-server object
 const httpServer = http.createServer((request, response) => {
-  // for a request to ws:// , the followind code inside of here will NOT be executed, instead the request will be passed onto the upgrade event emitter
+  // this is equivalent with an event listent for 'request'
+  // for a request to ws:// , the following code inside of here will NOT be executed, instead the request will be passed onto the upgrade event emitter
   // if no 'upgrade' event listener, an error will be thrown
   response.writeHead(200);
   response.end("OK");
@@ -36,8 +43,24 @@ httpServer.listen(CONFIG.PORT, CONFIG.HOST, () => {
   );
 });
 
-// implement basic error handling
+// handle inital http handshake in order to establish a ws connection
+// Docs: https://nodejs.org/docs/latest/api/http.html#event-upgrade_1
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+httpServer.on("upgrade", (request, socket, _head) => {
+  // Parsing required client request headers in conformity with https://www.rfc-editor.org/rfc/rfc6455.html#section-4.1
+  const validationResult = upgradeValidator.validate(request);
+  // https://www.rfc-editor.org/rfc/rfc6455.html#section-4.2.1
+  if (!validationResult.isValid) {
+    sendUpgradeErrorResponse(
+      socket,
+      400,
+      "The HTTP headers do not comply with the RFC6455 spec.",
+    );
+    return;
+  }
+});
 
+// implement basic error handling
 CONSTANTS.CUSTOM_ERRORS.forEach((errorEvent: string) => {
   process.on(errorEvent, (err: unknown) => {
     handleProcessErrors(err, errorEvent);
