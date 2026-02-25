@@ -93,6 +93,30 @@ class SecWebSocketKeyValidator implements RequestValidator {
   }
 }
 
+class SecWebSocketVersionValidator implements RequestValidator {
+  private supportedVersions: number[];
+
+  constructor(supportedVersions: number[] = [13]) {
+    this.supportedVersions = supportedVersions;
+  }
+
+  validate(request: http.IncomingMessage): ValidationResult {
+    const version = request.headers["sec-websocket-version"];
+    const isValid =
+      version !== undefined &&
+      this.supportedVersions.includes(parseInt(version as string, 10));
+
+    return {
+      isValid,
+      errors: !isValid
+        ? [
+            `Unsupported WebSocket version. Required: ${this.supportedVersions.join(", ")}, Got: ${version}`,
+          ]
+        : [],
+    };
+  }
+}
+
 class CompositeRequestValidator implements RequestValidator {
   private validators: RequestValidator[] = [];
 
@@ -127,7 +151,8 @@ export default class UpgradeValidatorFactory {
       .addValidator(new ConnectionHeaderValidator(config.connectionHeader))
       .addValidator(new MethodValidator(config.method))
       .addValidator(new OriginValidator(config.allowedOrigins))
-      .addValidator(new SecWebSocketKeyValidator());
+      .addValidator(new SecWebSocketKeyValidator())
+      .addValidator(new SecWebSocketVersionValidator([13]));
 
     return validator;
   }
