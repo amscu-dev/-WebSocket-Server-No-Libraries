@@ -9,6 +9,7 @@ import CONFIG from "@/config/app.config";
 import * as CONSTANTS from "@/libs/custom_lib/constants/constants";
 
 import sendUpgradeErrorResponse from "./libs/custom_lib/sendUpgradeErrorResponse";
+import { upgradeHttpConnection } from "./libs/custom_lib/upgradeHttpConnection";
 import UpgradeValidatorFactory from "./libs/custom_lib/validateHttpHandshake";
 import handleProcessErrors from "./utils/handleProcessErrors";
 
@@ -45,8 +46,8 @@ httpServer.listen(CONFIG.PORT, CONFIG.HOST, () => {
 
 // handle inital http handshake in order to establish a ws connection
 // Docs: https://nodejs.org/docs/latest/api/http.html#event-upgrade_1
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-httpServer.on("upgrade", (request, socket, _head) => {
+
+httpServer.on("upgrade", (request, socket) => {
   // Parsing required client request headers in conformity with https://www.rfc-editor.org/rfc/rfc6455.html#section-4.1
   const validationResult = upgradeValidator.validate(request);
   // https://www.rfc-editor.org/rfc/rfc6455.html#section-4.2.1
@@ -58,6 +59,7 @@ httpServer.on("upgrade", (request, socket, _head) => {
     );
     return;
   }
+  upgradeHttpConnection(request, socket);
 });
 
 // implement basic error handling
