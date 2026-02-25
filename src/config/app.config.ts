@@ -1,3 +1,4 @@
+import chalk from "chalk";
 import dotenv from "dotenv";
 import z from "zod";
 
@@ -21,7 +22,9 @@ try {
     NODE_ENV,
   });
   console.log(
-    `[ NODE ] Environment Variables loaded successfully: ${NODE_ENV}`,
+    chalk.yellow.bold(
+      `[ NODE ] Environment Variables loaded successfully: ${NODE_ENV}`,
+    ),
   );
 } catch (error) {
   if (error instanceof z.ZodError) {
