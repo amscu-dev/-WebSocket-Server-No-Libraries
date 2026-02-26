@@ -122,7 +122,7 @@ class CompositeRequestValidator implements RequestValidator {
 
   addValidator(validator: RequestValidator): this {
     this.validators.push(validator);
-    return this; // Fluent API
+    return this;
   }
 
   validate(request: http.IncomingMessage): ValidationResult {

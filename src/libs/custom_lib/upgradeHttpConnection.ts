@@ -1,8 +1,11 @@
 import crypto from "node:crypto";
 import http from "node:http";
+import net from "node:net";
 import { Duplex } from "node:stream";
 
 import * as CONSTANTS from "@/libs/custom_lib/constants/constants";
+
+import startWebSocketConnection from "./wsServerLogic";
 
 class UpgradeHeadersBuilder {
   private headers: Record<string, string> = {};
@@ -63,14 +66,11 @@ class HttpResponseBuilder {
   }
 }
 
-function startWebSocketConnection(socket: Duplex) {
-  console.log(socket);
-}
-
 export function upgradeHttpConnection(
   request: http.IncomingMessage,
   socket: Duplex,
 ): void {
+  const netSocket = socket as net.Socket;
   const headers = new UpgradeHeadersBuilder(request).build();
 
   const response = new HttpResponseBuilder(headers)
@@ -79,5 +79,5 @@ export function upgradeHttpConnection(
 
   socket.write(response);
 
-  startWebSocketConnection(socket);
+  startWebSocketConnection(netSocket);
 }

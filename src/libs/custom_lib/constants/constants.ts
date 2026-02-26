@@ -18,3 +18,7 @@ export const upgradeConfig: UpgradeConfig = {
 };
 
 export const GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+
+export const WS_DATA_FRAME_RULES = {
+  MIN_FRAME_SIZE: 2,
+};
