@@ -308,10 +308,12 @@ class WebSocketReceiver {
     // *** Loop for the full frame payload
     // If we not yet received the entire payload, wait for another 'data' event. (a single ws data frames beeing segmented in multiple TCP segments)
     // La TCP, un singur frame WebSocket poate ajunge în mai multe socket.on("data") chunks.
+    // + socket its a duplex stream so we read data from tcp socket in mai multe  'chunks'
 
     if (this._bufferedBytesLength < this._framePayloadLength) {
       // end loop and wait for new data to arrive
       this._taskLoop = false; // when taskLoop will be fired again it will start directly from this step bcs _task is left at GET_PAYLOAD state.
+      return;
     }
 
     // FULL FRAME RECEIVED ( attention full frame, we have to check FIN bit to know also if we received full message )
