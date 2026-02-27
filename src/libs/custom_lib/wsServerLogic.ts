@@ -25,94 +25,134 @@ const SEND_ECHO = 5;
  *       entire connection lifetime, accumulating chunks as they arrive.
  */
 class WebSocketReceiver {
+  /** TCP socket reference to the connected WebSocket client */
   private _socket: net.Socket;
+
   /**
    * Array of Buffer chunks received from TCP socket.
-   * Each element represents a separate chunk from socket.on("data").
-   * Chunks are consumed sequentially by _consumeHeaders().
+   * Each element represents a separate chunk from socket.on("data") event.
+   * Chunks are consumed sequentially by _consume() method.
+   * Example: [Buffer(50), Buffer(30), Buffer(20)] = 100 bytes total
    */
   private _buffersArray: Buffer[] = [];
 
   /**
-   * Total number of bytes accumulated in _buffersArray.
-   * Decremented as bytes are consumed during frame parsing.
-   * Goal: reduce to 0 when entire frame is processed.
+   * Cumulative byte count of all buffers in _buffersArray.
+   * Used to quickly check if we have enough bytes without iterating array.
+   * Decremented after each _consume() call.
+   * Invariant: should always equal sum of all buffer lengths
    */
   private _bufferedBytesLength: number = 0;
 
   /**
-   * Flag controlling the task loop iteration.
-   * Set to true when entering loop, set to false to terminate parsing
-   * and wait for next chunk batch.
+   * Control flag for the state machine loop iteration.
+   * - true: continue executing current task in loop
+   * - false: exit loop and wait for next TCP chunk via socket.on("data")
+   * Set to true in _startTaskLoop(), set to false when insufficient data
    */
   private _taskLoop: boolean = false;
 
   /**
    * Current state in the frame parsing state machine.
-   * Determines which parsing method to execute in switch statement.
-   * States: GET_INFO → GET_LENGTH → GET_MASK_KEY → GET_PAYLOAD → SEND_ECHO
+   * Determines which parsing method executes in the switch statement.
+   * Possible values:
+   * - GET_INFO: Parse first 2 bytes (FIN, opcode, mask, length indicator)
+   * - GET_LENGTH: Parse variable-length payload size field
+   * - GET_MASK_KEY: Parse 4-byte XOR mask key
+   * - GET_PAYLOAD: Extract and unmask actual frame payload
+   * - SEND_ECHO: Message complete, ready to send to client
    */
   private _task: number = GET_INFO;
 
   /**
-   * FIN bit (Frame Final flag) from RFC 6455.
-   * If true: this is the final fragment of the message.
-   * If false: more fragments expected.
+   * FIN bit (Frame Final flag) extracted from RFC 6455 first byte (bit 0).
+   * - true: this frame is the final fragment of the WebSocket message
+   * - false: more fragmented frames expected for this message
+   * Used to determine if we need to parse additional continuation frames
    */
   private _fin: boolean = false;
 
   /**
-   * Opcode field from first byte of WebSocket frame.
-   * Indicates data type:
-   * - 0x0: Continuation frame
-   * - 0x1: Text frame
-   * - 0x2: Binary frame
-   * - 0x8: Close frame
-   * - 0x9: Ping frame
-   * - 0xA: Pong frame
+   * Opcode field extracted from RFC 6455 first byte (bits 4-7).
+   * Indicates the type of frame data:
+   * - 0x0: Continuation frame (follows previous fragmented frame)
+   * - 0x1: Text frame (UTF-8 encoded text data)
+   * - 0x2: Binary frame (raw binary data)
+   * - 0x8: Connection close frame
+   * - 0x9: Ping frame (keepalive request)
+   * - 0xA: Pong frame (keepalive response)
    */
   private _opcode: null | number = null;
 
   /**
-   * MASK bit from second byte of WebSocket frame.
-   * If true: payload is masked (client-to-server, required per RFC 6455).
-   * If false: payload is unmasked (server-to-client).
+   * MASK bit extracted from RFC 6455 second byte (bit 0).
+   * - true: payload is XOR-masked (required for client-to-server per spec)
+   * - false: payload is unmasked (server-to-client, not allowed for clients)
+   * Server must reject frames where _masked === false
    */
   private _masked: boolean = false;
 
   /**
-   * Payload length indicator from bits 1-7 of second byte.
-   * Values: 0-125 (direct length), 126 (read 2 more bytes), 127 (read 8 more bytes).
-   * @see RFC 6455 section 5.2
+   * Payload length indicator from RFC 6455 second byte (bits 1-7).
+   * Variable-length encoding:
+   * - 0-125: Direct length value (no extra bytes needed)
+   * - 126: Next 2 bytes contain actual length as uint16 (65KB max)
+   * - 127: Next 8 bytes contain actual length as uint64 (huge payloads)
+   * @see RFC 6455 section 5.2 for specification details
    */
   private _initialPayloadSizeIndicator: number = 0;
 
   /**
-   * Actual payload length in bytes after decoding variable-length encoding.
-   * Calculated from _initialPayloadSizeIndicator by reading additional bytes if needed.
-   * Used to determine how many bytes to extract in GET_PAYLOAD state.
+   * Decoded payload length in bytes for current frame.
+   * Calculated from _initialPayloadSizeIndicator:
+   * - If indicator <= 125: _framePayloadLength = indicator
+   * - If indicator === 126: read 2 bytes, interpret as uint16BE
+   * - If indicator === 127: read 8 bytes, interpret as uint64BE
+   * Used in GET_PAYLOAD state to know how many bytes to extract
    */
   private _framePayloadLength: number = 0;
 
-  // in case of payload comes as fragmentat ws data frames
+  /**
+   * Cumulative payload length across all frames in fragmented message.
+   * Tracks total data received for multi-frame messages (FIN=0).
+   * Incremented in _processLength() for each frame.
+   * Used to enforce _maxPayload security limit across entire message
+   */
   private _totalPayloadLength: number = 0;
 
   /**
-   * Maximum allowed payload size (1 MB = 1,048,576 bytes).
+   * Maximum allowed payload size in bytes (1 MiB = 1,048,576 bytes).
    * Security limit to prevent memory exhaustion and DoS attacks.
-   * Frame rejected if payload exceeds this limit.
+   * If _totalPayloadLength exceeds this, throw error and close connection.
+   * Can be configured per instance if needed
    */
   private _maxPayload: number = 1024 * 1024;
 
-  // mask key set and send by the client
+  /**
+   * 4-byte XOR mask key sent by client in every WebSocket frame.
+   * Used to unmask payload data via bitwise XOR in _unmaskDataPayload().
+   * Client generates random key per frame for security purposes.
+   * Server must use exact same key to correctly unmask payload
+   */
   private _mask: Buffer = Buffer.alloc(
     CONSTANTS.WS_DATA_FRAME_RULES.MASK_KEY_LENGTH,
   );
 
+  /**
+   * Counter of frames received and successfully parsed.
+   * Incremented each time a complete frame payload is extracted.
+   * Can be used for debugging, metrics, or protocol validation
+   */
   private _framesReceived: number = 0;
 
-  // store fragments (frames) for reassembly
+  /**
+   * Array of unmasked payload buffers from all frames in current message.
+   * Stores fragments when FIN=0 (more frames coming).
+   * When FIN=1, concatenate all fragments and send complete message to client.
+   * Cleared after sending message to prepare for next multi-frame sequence
+   */
   private _fragments: Buffer[] = [];
+
   /**
    * Initializes WebSocketReceiver with TCP socket reference.
    *
@@ -125,13 +165,13 @@ class WebSocketReceiver {
   }
 
   /**
-   * Processes incoming TCP chunk and initiates frame parsing.
+   * Processes incoming TCP chunk and initiates frame parsing state machine.
    *
    * Called by socket.on("data") event listener whenever client sends bytes.
-   * Accumulates chunk in _buffersArray and triggers state machine parsing.
+   * Appends chunk to _buffersArray and attempts to parse available data.
    *
    * @param chunk - Buffer containing bytes received from TCP layer.
-   *                May be partial frame (data fragmentation).
+   *                May be partial frame due to TCP fragmentation.
    *
    * @example
    * socket.on("data", (chunk) => {
@@ -139,30 +179,34 @@ class WebSocketReceiver {
    * });
    */
   public processBuffer(chunk: Buffer) {
+    // Accumulate incoming bytes
     this._buffersArray.push(chunk);
     this._bufferedBytesLength += chunk.length;
-    // start processing & parsing bytes
 
+    // Start processing & parsing bytes
     this._startTaskLoop();
   }
 
   /**
-   * State machine loop for WebSocket frame parsing.
-   * Repeatedly executes current task (_task) until loop flag is cleared.
+   * Main state machine loop for WebSocket frame parsing.
    *
-   * Allows incremental parsing: parse what's available, then wait for
-   * next chunk if more data needed. When chunk arrives, loop resumes.
+   * Executes current task (_task) repeatedly until loop flag is cleared.
+   * Allows incremental parsing: parse what's available, then yield control
+   * back to event loop when more data needed. When next chunk arrives,
+   * loop resumes from same task state.
+   *
+   * Flow: GET_INFO → GET_LENGTH → GET_MASK_KEY → GET_PAYLOAD → (repeat or SEND_ECHO)
    *
    * @private
    */
   private _startTaskLoop() {
-    // set _taskLoop to false when we are done processing data
+    // Set _taskLoop to false when we are done processing data;
     this._taskLoop = true;
 
     do {
       switch (this._task) {
         case GET_INFO:
-          this._getInfo(); // first info get info about ws frame data received ( ws binary frame format )
+          this._getInfo();
           break;
         case GET_LENGTH:
           this._getLength();
@@ -189,253 +233,305 @@ class WebSocketReceiver {
    * - Bit 0: MASK flag (0x80)
    * - Bits 1-7: Payload length indicator (0x7F)
    *
+   * Validation: ensures client sent mask bit (server requirement).
+   * Transition: advances to GET_LENGTH state after successful parse.
+   *
    * @private
    */
   private _getInfo() {
-    if (
-      this._bufferedBytesLength < CONSTANTS.WS_DATA_FRAME_RULES.MIN_FRAME_SIZE
-    ) {
-      this._taskLoop = false;
-      return;
-    }
-
-    const infoBuffer = this._consumeHeaders(
+    // Attempt to extract 2-byte frame info header
+    const infoBuffer = this._consume(
       CONSTANTS.WS_DATA_FRAME_RULES.MIN_FRAME_SIZE,
     );
+
     if (!infoBuffer) {
-      throw Error(
-        "You cannot extract more data from a ws frame than the actual size.",
-      );
+      // End current execution of the loop & wait 'data' to be fired again and load data another chunk of data into _arrayBuffer
+      this._taskLoop = false; // When taskLoop will be fired again it will start directly from this step because we did not change current task;
+      return;
     }
 
     const firstByte = infoBuffer[0];
     const secondByte = infoBuffer[1];
 
+    // Extract frame metadata from header bytes
     this._fin = (firstByte & 0b10000000) === 0b10000000;
     this._opcode = firstByte & 0b00001111;
     this._masked = (secondByte & 0b10000000) === 0b10000000;
     this._initialPayloadSizeIndicator = secondByte & 0b01111111;
 
+    // Validate: RFC 6455 requires client frames to be masked
     if (!this._masked) {
-      // send a close frame back to the client
       throw new Error("Mask is not set by the client");
     }
 
+    // Proceed to parse variable-length payload size field
     this._task = GET_LENGTH;
   }
 
   /**
    * Parses payload length field from WebSocket frame header.
-   * Payload length uses variable-length encoding:
-   * - If indicator < 126: length is in indicator (already parsed)
-   * - If indicator = 126: next 2 bytes (uint16) contain length
-   * - If indicator = 127: next 8 bytes (uint64) contain length
    *
-   * Handles TCP fragmentation gracefully: if not enough bytes yet,
-   * stops parsing and waits for next chunk to arrive.
+   * Uses variable-length encoding to handle payloads of any size:
+   * - If indicator < 126: length is stored directly in indicator
+   * - If indicator = 126: read next 2 bytes as uint16BE for length
+   * - If indicator = 127: read next 8 bytes as uint64BE for length
+   *
+   * Gracefully handles TCP fragmentation: if required bytes unavailable,
+   * stops and waits for next chunk.
+   *
+   * Transition: advances to GET_MASK_KEY state after parsing length.
    *
    * @private
    */
   private _getLength() {
     switch (this._initialPayloadSizeIndicator) {
       case CONSTANTS.WS_DATA_FRAME_RULES.MEDIUM_SIZE_DATA_FLAG: {
-        const mediumPayloadLengthBuffer = this._consumeHeaders(
+        // Payload size in range 126-65535 (encoded in next 2 bytes)
+        const mediumPayloadLengthBuffer = this._consume(
           CONSTANTS.WS_DATA_FRAME_RULES.MEDIUM_SIZE_CONSUMPTION_BYTES,
         );
 
+        // Insufficient bytes, wait for next chunk
         if (!mediumPayloadLengthBuffer) {
-          throw new Error(
-            "Incomplete frame header: expected 2-byte payload length, " +
-              "but insufficient data received. " +
-              "Client may have fragmented WebSocket frame header.",
-          );
+          this._taskLoop = false; // Exit loop, keep _task at GET_LENGTH
+          return;
         }
 
+        // Decode 2-byte big-endian length
         this._framePayloadLength = mediumPayloadLengthBuffer.readUInt16BE();
 
+        // Validate against max payload limit
         this._processLength();
-
         break;
       }
+
       case CONSTANTS.WS_DATA_FRAME_RULES.LARGE_SIZE_DATA_FLAG: {
-        const largePayloadLengthBuffer = this._consumeHeaders(
+        // Payload size > 65535 (encoded in next 8 bytes)
+        const largePayloadLengthBuffer = this._consume(
           CONSTANTS.WS_DATA_FRAME_RULES.LARGE_SIZE_CONSUMPTION_BYTES,
         );
 
+        // Insufficient bytes, wait for next chunk
         if (!largePayloadLengthBuffer) {
-          throw new Error(
-            "Incomplete frame header: expected 8-byte payload length, " +
-              "but insufficient data received. " +
-              "Client may have fragmented WebSocket frame header.",
-          );
+          this._taskLoop = false; // Exit loop, keep _task at GET_LENGTH
+          return;
         }
 
+        // Decode 8-byte big-endian length (as bigint, then convert to number)
         this._framePayloadLength = Number(
           largePayloadLengthBuffer.readBigUInt64BE(),
         );
 
+        // Validate against max payload limit
         this._processLength();
-
         break;
       }
-      // payload <= 125 bytes
+
       default: {
+        // Payload size <= 125 bytes (length is already in indicator)
         this._framePayloadLength = this._initialPayloadSizeIndicator;
 
+        // Validate against max payload limit
         this._processLength();
         break;
       }
     }
   }
 
+  /**
+   * Validates cumulative payload length and transitions to mask key parsing.
+   *
+   * For fragmented messages (FIN=0), accumulates length across frames.
+   * Enforces security limit: rejects messages exceeding _maxPayload.
+   * Throws error if limit exceeded (closes connection).
+   *
+   * Transition: advances to GET_MASK_KEY state.
+   *
+   * @private
+   */
   private _processLength() {
-    // here we follow event fragemented data
+    // For multi-frame messages, track total payload across all frames
     this._totalPayloadLength += this._framePayloadLength;
+
+    // Security check: prevent memory exhaustion via oversized payloads
     if (this._totalPayloadLength > this._maxPayload) {
       throw new Error("Data its too large!");
     }
 
+    // Proceed to extract 4-byte mask key
     this._task = GET_MASK_KEY;
   }
 
+  /**
+   * Parses 4-byte XOR mask key from WebSocket frame header.
+   *
+   * Client sends unique random mask key with every frame for security.
+   * Key is used to unmask payload bytes via bitwise XOR operation.
+   * Must be extracted before attempting to unmask payload data.
+   *
+   * Validation: throws if insufficient bytes available.
+   * Transition: advances to GET_PAYLOAD state.
+   *
+   * @private
+   */
   private _getMaskKey() {
-    const maskeyHeader = this._consumeHeaders(
+    // Extract 4-byte mask key from header
+    const maskeyHeader = this._consume(
       CONSTANTS.WS_DATA_FRAME_RULES.MASK_KEY_LENGTH,
     );
 
+    // Insufficient bytes, wait for next chunk
     if (!maskeyHeader) {
-      throw new Error("Incomplete frame header: expected 4-byte mask key");
-    }
-
-    this._mask = maskeyHeader;
-    this._task = GET_PAYLOAD;
-  }
-
-  private _getPayload() {
-    // *** Loop for the full frame payload
-    // If we not yet received the entire payload, wait for another 'data' event. (a single ws data frames beeing segmented in multiple TCP segments)
-    // La TCP, un singur frame WebSocket poate ajunge în mai multe socket.on("data") chunks.
-    // + socket its a duplex stream so we read data from tcp socket in mai multe  'chunks'
-
-    if (this._bufferedBytesLength < this._framePayloadLength) {
-      // end loop and wait for new data to arrive
-      this._taskLoop = false; // when taskLoop will be fired again it will start directly from this step bcs _task is left at GET_PAYLOAD state.
+      this._taskLoop = false; // Exit loop, keep _task at GET_MASK_KEY
       return;
     }
 
-    // FULL FRAME RECEIVED ( attention full frame, we have to check FIN bit to know also if we received full message )
+    // Store mask key for use in unmasking payload
+    this._mask = maskeyHeader;
+
+    // Proceed to extract and unmask payload data
+    this._task = GET_PAYLOAD;
+  }
+
+  /**
+   * Extracts masked payload data and handles frame fragmentation.
+   *
+   * Processes frame payload in sequence:
+   * 1. Wait until full payload received (handles TCP fragmentation)
+   * 2. Extract payload bytes from buffer array
+   * 3. XOR-unmask payload using client's mask key
+   * 4. Handle frame type (close, binary, text)
+   * 5. Check FIN bit to determine next action:
+   *    - FIN=0 (continuation): append to fragments, loop for next frame
+   *    - FIN=1 (final): complete message, send to client
+   *
+   * Transition: either back to GET_INFO (FIN=0) or to SEND_ECHO (FIN=1).
+   *
+   * @private
+   */
+  private _getPayload() {
+    // Increment frame counter
     this._framesReceived++;
 
-    // consume payload ( full payload of a particular frame )
-    const frameMaskedPayloadBuffer = this._consumePayload(
-      this._framePayloadLength,
-    );
+    // Attempt to extract payload bytes
+    const frameMaskedPayloadBuffer = this._consume(this._framePayloadLength);
 
+    // Insufficient bytes yet, wait for next chunk
+    if (!frameMaskedPayloadBuffer) {
+      this._taskLoop = false; // Exit loop, keep _task at GET_PAYLOAD
+      return;
+    }
+
+    // Unmask payload using XOR with client's mask key
     const frameUnmaskedPayloadBuffer = this._unmaskDataPayload(
       frameMaskedPayloadBuffer,
       this._mask,
     );
 
-    // *** CLOSE FRAME
+    // *** Handle CLOSE frame
     if (this._opcode === CONSTANTS.WS_DATA_FRAME_RULES.OPCODE_CLOSE) {
-      //  TODO close connection
+      // TODO: Implement close connection logic
       return;
     }
 
-    // *** OTHER FRAME
+    // *** Handle BINARY frame
     if (this._opcode === CONSTANTS.WS_DATA_FRAME_RULES.OPCODE_BINARY) {
-      //  TODO treat binary data
+      // TODO: Implement binary data handling
       return;
     }
 
-    // *** TEXT FRAME
+    // *** Handle TEXT frame (or continuation)
     if (frameUnmaskedPayloadBuffer.length) {
       this._fragments.push(frameUnmaskedPayloadBuffer);
     }
-    // if fin in 0 , we have to wait and process more data
+
+    // Check FIN bit to determine if message is complete
     if (!this._fin) {
-      // FIN:0 => loop
-      this._task = GET_INFO; // => start loop again
+      // FIN=0: More frames coming, loop back to parse next frame header
+      this._task = GET_INFO;
     } else {
-      // FIN:1 => send data to client
+      // FIN=1: Message complete, send all accumulated fragments to client
+
       this._task = SEND_ECHO;
     }
-  }
-
-  private _consumePayload(n: number) {
-    this._bufferedBytesLength -= n;
-
-    const payloadBuffer = Buffer.alloc(n);
-    let totalBytesRead = 0;
-
-    while (totalBytesRead < n) {
-      const buf = this._buffersArray[0];
-      const bytesToRead = Math.min(n - totalBytesRead, buf.length);
-      buf.copy(payloadBuffer, totalBytesRead, 0, bytesToRead);
-
-      if (bytesToRead < buf.length) {
-        this._buffersArray[0] = buf.subarray(bytesToRead);
-      } else {
-        this._buffersArray.shift(); // remove the first chunk in the array
-      }
-
-      totalBytesRead += bytesToRead;
-    }
-
-    return payloadBuffer;
   }
 
   /**
    * Extracts and removes first N bytes from accumulated buffer array.
    *
    * Handles three cases:
-   * 1. Exact match: First buffer has exactly N bytes → return and remove
-   * 2. Partial: First buffer has > N bytes → return N bytes, keep rest
-   * 3. Insufficient: First buffer has < N bytes → return undefined
+   * 1. Sufficient total bytes: extracts N bytes, updates bookkeeping
+   * 2. Insufficient total bytes: returns undefined, waits for more data
+   * 3. Buffer boundaries: correctly handles spans across multiple buffers
    *
-   * This allows frame parsing to proceed incrementally as chunks arrive,
-   * even when data is fragmented across multiple TCP packets.
+   * When extracting:
+   * - Combines partial buffers as needed
+   * - Removes fully consumed buffers from array
+   * - Updates _bufferedBytesLength counter
+   *
+   * This is the core mechanism enabling incremental parsing of fragmented
+   * TCP chunks into logical WebSocket frame components.
    *
    * @param n - Number of bytes to extract
-   * @returns Buffer containing requested bytes, or undefined if insufficient data
+   * @returns Concatenated buffer of N bytes, or undefined if insufficient data
    *
    * @private
    */
-  private _consumeHeaders(n: number): Buffer | undefined {
-    // Case 1: First buffer has EXACTLY n bytes
-    if (n === this._buffersArray[0].length) {
-      // Remove and return entire buffer
-      const buffer = this._buffersArray.shift();
-
-      //  decrement (after we know we have enough)
-      this._bufferedBytesLength -= n;
-
-      return buffer;
+  private _consume(n: number): Buffer | undefined {
+    // Quick check: do we have enough total bytes accumulated?
+    if (this._bufferedBytesLength < n) {
+      return undefined; // Not enough data yet, wait for next chunk
     }
 
-    // Case 2: First buffer has MORE than n bytes
-    if (n < this._buffersArray[0].length) {
-      // Extract first n bytes
-      const consumed = this._buffersArray[0].subarray(0, n);
+    // Allocate output buffer of exact size needed
+    const payloadBuffer = Buffer.alloc(n);
+    let totalBytesRead = 0;
 
-      // Keep remainder in array
-      this._buffersArray[0] = this._buffersArray[0].subarray(n);
+    // Extract N bytes, possibly spanning multiple buffers in array
+    while (totalBytesRead < n) {
+      const buf = this._buffersArray[0];
+      const bytesToRead = Math.min(n - totalBytesRead, buf.length);
 
-      //  decrement (we know we have enough)
-      this._bufferedBytesLength -= n;
+      // Copy bytes from current buffer into output
+      buf.copy(payloadBuffer, totalBytesRead, 0, bytesToRead);
 
-      return consumed;
+      // Update current buffer: remove consumed bytes
+      if (bytesToRead < buf.length) {
+        // Partial consumption: keep remainder in array
+        this._buffersArray[0] = buf.subarray(bytesToRead);
+      } else {
+        // Full consumption: remove buffer from array
+        this._buffersArray.shift();
+      }
+
+      totalBytesRead += bytesToRead;
     }
 
-    // Case 3: First buffer has LESS than n bytes
-    // n > this._buffersArray[0].length
-    // DO NOT DECREMENT - we don't have enough bytes!
-    // Just return undefined and wait for next chunk
+    // Update byte counter to reflect extraction
+    this._bufferedBytesLength -= n;
 
-    return undefined;
+    return payloadBuffer;
   }
 
+  /**
+   * Unmasks frame payload using XOR with client's 4-byte mask key.
+   *
+   * RFC 6455 masking algorithm:
+   * - Client sends mask key (4 bytes)
+   * - Each payload byte at index i is XORed with mask[i mod 4]
+   * - Server unmasks by XORing again (XOR is self-inverse)
+   * - Result is original unmasked data
+   *
+   * Modifies payloadBuffer in-place (does not allocate new buffer).
+   *
+   * @param payloadBuffer - Masked payload bytes from WebSocket frame
+   * @param maskKey - 4-byte XOR mask key from frame header
+   * @returns Same buffer object, now containing unmasked data
+   *
+   * @private
+   */
   private _unmaskDataPayload(payloadBuffer: Buffer, maskKey: Buffer) {
+    // XOR each payload byte with corresponding mask byte (cycling through 4-byte key)
     for (let index = 0; index < payloadBuffer.length; index++) {
       payloadBuffer[index] =
         payloadBuffer[index] ^
