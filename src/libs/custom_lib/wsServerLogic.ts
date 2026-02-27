@@ -109,6 +109,8 @@ class WebSocketReceiver {
     CONSTANTS.WS_DATA_FRAME_RULES.MASK_KEY_LENGTH,
   );
 
+  private _framesReceived: number = 0;
+
   /**
    * Initializes WebSocketReceiver with TCP socket reference.
    *
@@ -165,6 +167,9 @@ class WebSocketReceiver {
           break;
         case GET_MASK_KEY:
           this._getMaskKey();
+          break;
+        case GET_PAYLOAD:
+          this._getPayload();
           break;
       }
     } while (this._taskLoop);
@@ -274,6 +279,71 @@ class WebSocketReceiver {
     }
   }
 
+  private _processLength() {
+    this._totalPayloadLength += this._framePayloadLength;
+    if (this._totalPayloadLength > this._maxPayload) {
+      throw new Error("Data its too large!");
+    }
+
+    this._task = GET_MASK_KEY;
+  }
+
+  private _getMaskKey() {
+    const maskeyHeader = this._consumeHeaders(
+      CONSTANTS.WS_DATA_FRAME_RULES.MASK_KEY_LENGTH,
+    );
+
+    if (!maskeyHeader) {
+      throw new Error("Incomplete frame header: expected 4-byte mask key");
+    }
+
+    this._mask = maskeyHeader;
+    this._task = GET_PAYLOAD;
+  }
+
+  private _getPayload() {
+    // *** Loop for the full frame payload
+    // If we not yet received the entire payload, wait for another 'data' event. (a single ws data frames beeing segmented in multiple TCP segments)
+    // La TCP, un singur frame WebSocket poate ajunge în mai multe socket.on("data") chunks.
+
+    if (this._bufferedBytesLength < this._framePayloadLength) {
+      // end loop and wait for new data to arrive
+      this._taskLoop = false; // when taskLoop will be fired again it will start directly from this step bcs _task is left at GET_PAYLOAD state.
+    }
+
+    // FULL FRAME RECEIVED ( attention full frame, we have to check FIN bit to know also if we received full message )
+    this._framesReceived++;
+
+    // consume payload
+    const fullMaskedPayloadBuffer = this._consumePayload(
+      this._framePayloadLength,
+    );
+    console.log(fullMaskedPayloadBuffer);
+  }
+
+  private _consumePayload(n: number) {
+    this._bufferedBytesLength -= n;
+
+    const payloadBuffer = Buffer.alloc(n);
+    let totalBytesRead = 0;
+
+    while (totalBytesRead < n) {
+      const buf = this._buffersArray[0];
+      const bytesToRead = Math.min(n - totalBytesRead, buf.length);
+      buf.copy(payloadBuffer, totalBytesRead, 0, bytesToRead);
+
+      if (bytesToRead < buf.length) {
+        this._buffersArray[0] = buf.subarray(bytesToRead);
+      } else {
+        this._buffersArray.shift(); // remove the first chunk in the array
+      }
+      // 🟢
+      totalBytesRead = bytesToRead;
+    }
+
+    return payloadBuffer;
+  }
+
   /**
    * Extracts and removes first N bytes from accumulated buffer array.
    *
@@ -324,27 +394,7 @@ class WebSocketReceiver {
     return undefined;
   }
 
-  private _processLength() {
-    this._framePayloadLength += this._framePayloadLength;
-    if (this._totalPayloadLength > this._maxPayload) {
-      throw new Error("Data its too large!");
-    }
-
-    this._task = GET_MASK_KEY;
-  }
-
-  private _getMaskKey() {
-    const maskeyHeader = this._consumeHeaders(
-      CONSTANTS.WS_DATA_FRAME_RULES.MASK_KEY_LENGTH,
-    );
-
-    if (!maskeyHeader) {
-      throw new Error("Incomplete frame header: expected 4-byte mask key");
-    }
-
-    this._mask = maskeyHeader;
-    this._task = GET_PAYLOAD;
-  }
+  private _unmaskData() {}
 }
 
 // WEBSOCKET SERVER LOGIC
