@@ -318,7 +318,13 @@ class WebSocketReceiver {
     const fullMaskedPayloadBuffer = this._consumePayload(
       this._framePayloadLength,
     );
-    console.log(fullMaskedPayloadBuffer);
+
+    const fullUnmaskedPayloadBuffer = this._unmaskDataPayload(
+      fullMaskedPayloadBuffer,
+      this._mask,
+    );
+
+    console.log(fullUnmaskedPayloadBuffer);
   }
 
   private _consumePayload(n: number) {
@@ -394,7 +400,15 @@ class WebSocketReceiver {
     return undefined;
   }
 
-  private _unmaskData() {}
+  private _unmaskDataPayload(payloadBuffer: Buffer, maskKey: Buffer) {
+    for (let index = 0; index < payloadBuffer.length; index++) {
+      payloadBuffer[index] =
+        payloadBuffer[index] ^
+        maskKey[index & CONSTANTS.WS_DATA_FRAME_RULES.MASK_KEY_LENGTH];
+    }
+
+    return payloadBuffer;
+  }
 }
 
 // WEBSOCKET SERVER LOGIC
