@@ -111,6 +111,8 @@ class WebSocketReceiver {
 
   private _framesReceived: number = 0;
 
+  // store fragments (frames) for reassembly
+  private _fragments: Buffer[] = [];
   /**
    * Initializes WebSocketReceiver with TCP socket reference.
    *
@@ -280,6 +282,7 @@ class WebSocketReceiver {
   }
 
   private _processLength() {
+    // here we follow event fragemented data
     this._totalPayloadLength += this._framePayloadLength;
     if (this._totalPayloadLength > this._maxPayload) {
       throw new Error("Data its too large!");
@@ -324,7 +327,17 @@ class WebSocketReceiver {
       this._mask,
     );
 
-    console.log(fullUnmaskedPayloadBuffer);
+    if (fullUnmaskedPayloadBuffer.length) {
+      this._fragments.push(fullUnmaskedPayloadBuffer);
+    }
+    // if fin in 0 , we have to wait and process more data
+    if (!this._fin) {
+      // FIN:0 => loop
+      this._task = GET_INFO; // => start loop again
+    } else {
+      // FIN:1 => send data to client
+      this._task = SEND_ECHO;
+    }
   }
 
   private _consumePayload(n: number) {
