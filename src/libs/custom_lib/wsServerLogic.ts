@@ -356,8 +356,8 @@ class WebSocketReceiver {
       } else {
         this._buffersArray.shift(); // remove the first chunk in the array
       }
-      // 🟢
-      totalBytesRead = bytesToRead;
+
+      totalBytesRead += bytesToRead;
     }
 
     return payloadBuffer;
