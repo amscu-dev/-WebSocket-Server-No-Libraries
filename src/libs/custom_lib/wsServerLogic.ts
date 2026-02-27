@@ -192,6 +192,13 @@ class WebSocketReceiver {
    * @private
    */
   private _getInfo() {
+    if (
+      this._bufferedBytesLength < CONSTANTS.WS_DATA_FRAME_RULES.MIN_FRAME_SIZE
+    ) {
+      this._taskLoop = false;
+      return;
+    }
+
     const infoBuffer = this._consumeHeaders(
       CONSTANTS.WS_DATA_FRAME_RULES.MIN_FRAME_SIZE,
     );
@@ -319,18 +326,31 @@ class WebSocketReceiver {
     // FULL FRAME RECEIVED ( attention full frame, we have to check FIN bit to know also if we received full message )
     this._framesReceived++;
 
-    // consume payload
-    const fullMaskedPayloadBuffer = this._consumePayload(
+    // consume payload ( full payload of a particular frame )
+    const frameMaskedPayloadBuffer = this._consumePayload(
       this._framePayloadLength,
     );
 
-    const fullUnmaskedPayloadBuffer = this._unmaskDataPayload(
-      fullMaskedPayloadBuffer,
+    const frameUnmaskedPayloadBuffer = this._unmaskDataPayload(
+      frameMaskedPayloadBuffer,
       this._mask,
     );
 
-    if (fullUnmaskedPayloadBuffer.length) {
-      this._fragments.push(fullUnmaskedPayloadBuffer);
+    // *** CLOSE FRAME
+    if (this._opcode === CONSTANTS.WS_DATA_FRAME_RULES.OPCODE_CLOSE) {
+      //  TODO close connection
+      return;
+    }
+
+    // *** OTHER FRAME
+    if (this._opcode === CONSTANTS.WS_DATA_FRAME_RULES.OPCODE_BINARY) {
+      //  TODO treat binary data
+      return;
+    }
+
+    // *** TEXT FRAME
+    if (frameUnmaskedPayloadBuffer.length) {
+      this._fragments.push(frameUnmaskedPayloadBuffer);
     }
     // if fin in 0 , we have to wait and process more data
     if (!this._fin) {
