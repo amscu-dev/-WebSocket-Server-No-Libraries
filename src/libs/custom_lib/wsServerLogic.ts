@@ -82,13 +82,32 @@ class WebSocketReceiver {
 
   /**
    * Payload length indicator from bits 1-7 of second byte.
-   * If value < 126: payload length in bytes.
-   * If value = 126: next 2 bytes contain actual length.
-   * If value = 127: next 8 bytes contain actual length.
+   * Values: 0-125 (direct length), 126 (read 2 more bytes), 127 (read 8 more bytes).
+   * @see RFC 6455 section 5.2
    */
   private _initialPayloadSizeIndicator: number = 0;
 
+  /**
+   * Actual payload length in bytes after decoding variable-length encoding.
+   * Calculated from _initialPayloadSizeIndicator by reading additional bytes if needed.
+   * Used to determine how many bytes to extract in GET_PAYLOAD state.
+   */
   private _framePayloadLength: number = 0;
+
+  // in case of payload comes as fragmentat ws data frames
+  private _totalPayloadLength: number = 0;
+
+  /**
+   * Maximum allowed payload size (1 MB = 1,048,576 bytes).
+   * Security limit to prevent memory exhaustion and DoS attacks.
+   * Frame rejected if payload exceeds this limit.
+   */
+  private _maxPayload: number = 1024 * 1024;
+
+  // mask key set and send by the client
+  private _mask: Buffer = Buffer.alloc(
+    CONSTANTS.WS_DATA_FRAME_RULES.MASK_KEY_LENGTH,
+  );
 
   /**
    * Initializes WebSocketReceiver with TCP socket reference.
@@ -143,6 +162,9 @@ class WebSocketReceiver {
           break;
         case GET_LENGTH:
           this._getLength();
+          break;
+        case GET_MASK_KEY:
+          this._getMaskKey();
           break;
       }
     } while (this._taskLoop);
@@ -217,7 +239,7 @@ class WebSocketReceiver {
 
         this._framePayloadLength = mediumPayloadLengthBuffer.readUInt16BE();
 
-        // this.processLength();
+        this._processLength();
 
         break;
       }
@@ -238,7 +260,7 @@ class WebSocketReceiver {
           largePayloadLengthBuffer.readBigUInt64BE(),
         );
 
-        // this.processLength();
+        this._processLength();
 
         break;
       }
@@ -246,11 +268,12 @@ class WebSocketReceiver {
       default: {
         this._framePayloadLength = this._initialPayloadSizeIndicator;
 
-        // this.processLength();
+        this._processLength();
         break;
       }
     }
   }
+
   /**
    * Extracts and removes first N bytes from accumulated buffer array.
    *
@@ -299,6 +322,28 @@ class WebSocketReceiver {
     // Just return undefined and wait for next chunk
 
     return undefined;
+  }
+
+  private _processLength() {
+    this._framePayloadLength += this._framePayloadLength;
+    if (this._totalPayloadLength > this._maxPayload) {
+      throw new Error("Data its too large!");
+    }
+
+    this._task = GET_MASK_KEY;
+  }
+
+  private _getMaskKey() {
+    const maskeyHeader = this._consumeHeaders(
+      CONSTANTS.WS_DATA_FRAME_RULES.MASK_KEY_LENGTH,
+    );
+
+    if (!maskeyHeader) {
+      throw new Error("Incomplete frame header: expected 4-byte mask key");
+    }
+
+    this._mask = maskeyHeader;
+    this._task = GET_PAYLOAD;
   }
 }
 
