@@ -5,7 +5,7 @@ import { Duplex } from "node:stream";
 
 import * as CONSTANTS from "@/libs/custom_lib/constants/constants";
 
-import startWebSocketConnection from "./wsServerLogic";
+import WebSocketServer from "./wsServerLogic";
 
 class UpgradeHeadersBuilder {
   private headers: Record<string, string> = {};
@@ -77,7 +77,30 @@ export function upgradeHttpConnection(
     .setStatus(101, "Switching Protocols")
     .build();
 
-  socket.write(response);
+  netSocket.write(response);
 
-  startWebSocketConnection(netSocket);
+  // WEBSOCKET SERVER LOGIC
+  // code below will relate to our custom websocket server
+  console.log(
+    `[ WS ] WebSocket Connection established. Client port: ${netSocket.remotePort}. Client IP: ${netSocket.remoteAddress}`,
+  );
+  // receiver its not garbage collected bcs of closure, and its must be the same unique receiver obj for an entire lifetime of an connection because of fragmentation of data
+  const receiver = new WebSocketServer(netSocket);
+  // socket = TCP Communication Socket ( we can both read and write to it - its a full duplex )
+  // The Flow:
+  // 1. upgradeHttpConnection() - sends HTTP 101 response
+  // 2. startWebSocketConnection(socket) - attaches event listeners
+  // 3. startWebSocketConnection() TERMINATES
+  // 4. Socket remains in memory - Node.js maintains internal reference
+  // 5. When data arrives - callback executes automatically
+  socket.on("data", (chunk: Buffer) => {
+    console.log(
+      "Read another chunk of data from socket. TCP chunk length:",
+      chunk.length,
+    );
+    receiver.processBuffer(chunk);
+  });
+  socket.on("end", () => {
+    console.log("there will be no more data. The WS connection is closed.");
+  });
 }

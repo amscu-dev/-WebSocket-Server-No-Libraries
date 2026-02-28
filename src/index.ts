@@ -8,9 +8,11 @@ import chalk from "chalk";
 import CONFIG from "@/config/app.config";
 import * as CONSTANTS from "@/libs/custom_lib/constants/constants";
 
-import sendUpgradeErrorResponse from "./libs/custom_lib/sendUpgradeErrorResponse";
 import { upgradeHttpConnection } from "./libs/custom_lib/upgradeHttpConnection";
-import UpgradeValidatorFactory from "./libs/custom_lib/validateHttpHandshake";
+import {
+  sendUpgradeErrorResponse,
+  UpgradeValidatorFactory,
+} from "./libs/custom_lib/validateHttpHandshake";
 import handleProcessErrors from "./utils/handleProcessErrors";
 
 console.log(

@@ -1,4 +1,5 @@
 import http from "node:http";
+import { Duplex } from "node:stream";
 
 import { UpgradeConfig } from "./constants/constants";
 
@@ -142,7 +143,7 @@ class CompositeRequestValidator implements RequestValidator {
   }
 }
 
-export default class UpgradeValidatorFactory {
+export class UpgradeValidatorFactory {
   static createValidator(config: UpgradeConfig): RequestValidator {
     const validator = new CompositeRequestValidator();
 
@@ -156,4 +157,21 @@ export default class UpgradeValidatorFactory {
 
     return validator;
   }
+}
+
+export function sendUpgradeErrorResponse(
+  socket: Duplex,
+  statusCode: number,
+  message: string,
+): void {
+  const messageLength = message.length;
+  const response =
+    `HTTP/1.1 ${statusCode} Bad Request\r\n` +
+    `Content-Type: text/plain\r\n` +
+    `Content-Length: ${messageLength}\r\n` +
+    `\r\n` +
+    message;
+
+  socket.write(response);
+  socket.destroy();
 }

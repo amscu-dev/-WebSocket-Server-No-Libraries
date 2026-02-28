@@ -24,7 +24,7 @@ const SEND_ECHO = 5;
  * @note Receiver instance is kept alive via closure and persists for the
  *       entire connection lifetime, accumulating chunks as they arrive.
  */
-class WebSocketReceiver {
+export default class WebSocketServer {
   /** TCP socket reference to the connected WebSocket client */
   private _socket: net.Socket;
 
@@ -202,7 +202,9 @@ class WebSocketReceiver {
   private _startTaskLoop() {
     // Set _taskLoop to false when we are done processing data;
     this._taskLoop = true;
-
+    console.log(
+      `Start TaskLoop. Current task is ${this._task} for processing current ws message.`,
+    );
     do {
       switch (this._task) {
         case GET_INFO:
@@ -217,8 +219,14 @@ class WebSocketReceiver {
         case GET_PAYLOAD:
           this._getPayload();
           break;
+        case SEND_ECHO:
+          this._sendEcho();
+          break;
       }
     } while (this._taskLoop);
+    console.log(
+      `Processed all available chunks: ${this._bufferedBytesLength} : ${this._buffersArray.length}`,
+    );
   }
 
   /**
@@ -247,6 +255,9 @@ class WebSocketReceiver {
     if (!infoBuffer) {
       // End current execution of the loop & wait 'data' to be fired again and load data another chunk of data into _arrayBuffer
       this._taskLoop = false; // When taskLoop will be fired again it will start directly from this step because we did not change current task;
+      console.log(
+        `TaskLoop is currently at task: ${this._task}. Aditional buffers need to parse data.`,
+      );
       return;
     }
 
@@ -294,6 +305,9 @@ class WebSocketReceiver {
         // Insufficient bytes, wait for next chunk
         if (!mediumPayloadLengthBuffer) {
           this._taskLoop = false; // Exit loop, keep _task at GET_LENGTH
+          console.log(
+            `TaskLoop is currently at task: ${this._task}. Aditional buffers need to parse data.`,
+          );
           return;
         }
 
@@ -314,6 +328,9 @@ class WebSocketReceiver {
         // Insufficient bytes, wait for next chunk
         if (!largePayloadLengthBuffer) {
           this._taskLoop = false; // Exit loop, keep _task at GET_LENGTH
+          console.log(
+            `TaskLoop is currently at task: ${this._task}. Aditional buffers need to parse data.`,
+          );
           return;
         }
 
@@ -383,6 +400,9 @@ class WebSocketReceiver {
     // Insufficient bytes, wait for next chunk
     if (!maskeyHeader) {
       this._taskLoop = false; // Exit loop, keep _task at GET_MASK_KEY
+      console.log(
+        `TaskLoop is currently at task: ${this._task}. Aditional buffers need to parse data.`,
+      );
       return;
     }
 
@@ -419,6 +439,9 @@ class WebSocketReceiver {
     // Insufficient bytes yet, wait for next chunk
     if (!frameMaskedPayloadBuffer) {
       this._taskLoop = false; // Exit loop, keep _task at GET_PAYLOAD
+      console.log(
+        `TaskLoop is currently at task: ${this._task}. Aditional buffers need to parse data.`,
+      );
       return;
     }
 
@@ -454,6 +477,119 @@ class WebSocketReceiver {
 
       this._task = SEND_ECHO;
     }
+  }
+
+  private _sendEcho() {
+    const fullMessageBuffer = Buffer.concat(this._fragments);
+
+    const payloadLength = fullMessageBuffer.length;
+
+    let additionalPayloadSizeIndicator = null;
+
+    switch (true) {
+      case payloadLength <= CONSTANTS.WS_DATA_FRAME_RULES.SMALL_DATA_SIZE:
+        additionalPayloadSizeIndicator = 0;
+        break;
+      case payloadLength > CONSTANTS.WS_DATA_FRAME_RULES.SMALL_DATA_SIZE &&
+        payloadLength <= CONSTANTS.WS_DATA_FRAME_RULES.MEDIUM_DATA_SIZE:
+        additionalPayloadSizeIndicator =
+          CONSTANTS.WS_DATA_FRAME_RULES.MEDIUM_SIZE_CONSUMPTION_BYTES;
+        break;
+      default:
+        additionalPayloadSizeIndicator =
+          CONSTANTS.WS_DATA_FRAME_RULES.LARGE_SIZE_CONSUMPTION_BYTES;
+        break;
+    }
+
+    const frame = Buffer.alloc(
+      CONSTANTS.WS_DATA_FRAME_RULES.MIN_FRAME_SIZE +
+        additionalPayloadSizeIndicator +
+        payloadLength,
+    );
+
+    // Construct First Byte
+    const fin = 0b1; // sau 0b00000001
+    const rsv1 = 0b0; // sau 0b00000000
+    const rsv2 = 0x00;
+    const rsv3 = 0x00;
+    const opcode = CONSTANTS.WS_DATA_FRAME_RULES.OPCODE_TEXT;
+    const firstByte =
+      (fin << 7) | (rsv1 << 6) | (rsv2 << 5) | (rsv3 << 4) | opcode;
+    frame[0] = firstByte;
+
+    // Construct Payload Bytes Info
+    // mask bit 0 for server side
+    const maskBit = 0x00;
+
+    if (payloadLength <= CONSTANTS.WS_DATA_FRAME_RULES.SMALL_DATA_SIZE) {
+      // JavaScript converts numbers to binary
+      // Then performs the OR operation: 0b10000000 | 0b00110010 = 0b1011001
+      frame[1] = maskBit | payloadLength;
+    } else if (
+      payloadLength <= CONSTANTS.WS_DATA_FRAME_RULES.MEDIUM_DATA_SIZE
+    ) {
+      frame[1] = maskBit | CONSTANTS.WS_DATA_FRAME_RULES.MEDIUM_SIZE_DATA_FLAG;
+      frame.writeUInt16BE(payloadLength, 2);
+    } else {
+      frame[1] = maskBit | CONSTANTS.WS_DATA_FRAME_RULES.LARGE_SIZE_DATA_FLAG;
+      frame.writeBigUInt64BE(BigInt(payloadLength), 2);
+    }
+
+    // copy message into frame buffer
+    const messageStartOffset =
+      CONSTANTS.WS_DATA_FRAME_RULES.MIN_FRAME_SIZE +
+      additionalPayloadSizeIndicator;
+    fullMessageBuffer.copy(frame, messageStartOffset);
+
+    this._socket.write(frame);
+    console.log(
+      "WS Message succesfully parsed (all fragments received). Echo message back to the client.",
+    );
+    // reset task loop as we finish to parse a full ws message
+    this._reset();
+  }
+
+  /**
+   * Resets parser state after completing one WebSocket message.
+   *
+   * IMPORTANT: Only resets frame/message-specific state, NOT the buffer array.
+   * This allows the parser to continue processing subsequent messages that may
+   * have arrived in the same TCP chunk.
+   *
+   * Why we DON'T reset _buffersArray and _bufferedBytesLength:
+   * If multiple WebSocket messages arrive in a single TCP chunk, the parser
+   * consumes them one at a time using _consume(). When one message completes,
+   * remaining data for the next message is still in _buffersArray. Resetting
+   * these would lose that data permanently.
+   *
+   * Example:
+   * TCP Chunk arrives: [Complete Message 1] + [Partial Message 2]
+   * - Parse Message 1: _consume() extracts it from _buffersArray
+   * - _buffersArray now contains only Message 2's data
+   * - _reset() prepares for next message WITHOUT clearing the buffer
+   * - Parser continues and processes Message 2 from remaining data
+   *
+   * @private
+   */
+  private _reset() {
+    // Reset current frame/message state
+    this._task = GET_INFO;
+    this._fin = false;
+    this._opcode = null;
+    this._masked = false;
+    this._initialPayloadSizeIndicator = 0;
+    this._framePayloadLength = 0;
+    this._totalPayloadLength = 0;
+    this._framesReceived = 0;
+    this._fragments = [];
+
+    // Don`t !!!
+    // this._bufferedBytesLength = 0;
+    // this._buffersArray = [];
+    // this._taskLoop = false;
+    // DO NOT reset these - they contain data for the next message:
+    // - _buffersArray (may contain partial data from next message)
+    // - _bufferedBytesLength (must reflect actual buffered data)
   }
 
   /**
@@ -535,32 +671,9 @@ class WebSocketReceiver {
     for (let index = 0; index < payloadBuffer.length; index++) {
       payloadBuffer[index] =
         payloadBuffer[index] ^
-        maskKey[index & CONSTANTS.WS_DATA_FRAME_RULES.MASK_KEY_LENGTH];
+        maskKey[index % CONSTANTS.WS_DATA_FRAME_RULES.MASK_KEY_LENGTH];
     }
 
     return payloadBuffer;
   }
-}
-
-// WEBSOCKET SERVER LOGIC
-// code below will relate to our custom websocket server
-export default function startWebSocketConnection(socket: net.Socket) {
-  console.log(
-    `[ WS ] WebSocket Connection established. Client port: ${socket.remotePort}. Client IP: ${socket.remoteAddress}`,
-  );
-  // receiver its not garbage collected bcs of closure, and its must be the same unique receiver obj for an entire lifetime of an connection because of fragmentation of data
-  const receiver = new WebSocketReceiver(socket);
-  // socket = TCP Communication Socket ( we can both read and write to it - its a full duplex )
-  // The Flow:
-  // 1. upgradeHttpConnection() - sends HTTP 101 response
-  // 2. startWebSocketConnection(socket) - attaches event listeners
-  // 3. startWebSocketConnection() TERMINATES
-  // 4. Socket remains in memory - Node.js maintains internal reference
-  // 5. When data arrives - callback executes automatically
-  socket.on("data", (chunk: Buffer) => {
-    receiver.processBuffer(chunk);
-  });
-  socket.on("end", () => {
-    console.log("there will be no more data. The WS connection is closed.");
-  });
 }
