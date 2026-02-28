@@ -164,14 +164,28 @@ export default class WebSocketServer extends EventEmitter {
   constructor(socket: net.Socket) {
     super();
     this._socket = socket;
+    this._setupSocketListeners();
+  }
 
-    // socket = TCP Communication Socket ( we can both read and write to it - its a full duplex )
-    // The Flow:
-    // 1. upgradeHttpConnection() - sends HTTP 101 response
-    // 2. startWebSocketConnection(socket) - attaches event listeners
-    // 3. startWebSocketConnection() TERMINATES
-    // 4. Socket remains in memory - Node.js maintains internal reference
-    // 5. When data arrives - callback executes automatically
+  /**
+   * Register all socket event listeners.
+   * Each callback creates a closure that holds reference to `this`.
+   * This keeps WebSocketServer instance in memory while socket is active.
+   *
+   * Memory Flow:
+   * 1. upgradeHttpConnection() creates WebSocketServer instance
+   * 2. _setupSocketListeners() registers callbacks (closures)
+   * 3. Closures capture `this` reference
+   * 4. upgradeHttpConnection() ends (wsServer variable deleted)
+   * 5. WebSocketServer stays in memory (closure holds `this`) ✅
+   * 6. socket.destroy() removes listeners, breaks closure
+   * 7. WebSocketServer can be garbage collected ✅
+   *
+   * @private
+   */
+  private _setupSocketListeners(): void {
+    // CLOSURE: Captures `this`, `socket`, `chunk`
+    // Called when client sends data - accumulate bytes and parse frames
     this._socket.on("data", (chunk: Buffer) => {
       console.log(
         "Read another chunk of data from socket. TCP chunk length:",
@@ -180,17 +194,43 @@ export default class WebSocketServer extends EventEmitter {
       this._processBuffer(chunk);
     });
 
+    // CLOSURE: Captures `this`, `socket`
+    // Called when client sends FIN packet (graceful disconnect)
     this._socket.on("end", () => {
       console.log("there will be no more data. The WS connection is closed.");
     });
 
+    // CLOSURE: Captures `this`, `socket`, `err`
+    // Called if socket encounters an error - emit event and cleanup
     this._socket.on("error", (err) => {
       console.error("socket error:", err);
     });
 
+    // CLOSURE: Captures `this`, `socket`
+    // Called when socket fully closed - all TCP resources freed
     this._socket.on("close", () => {
       console.log("socket fully closed");
     });
+    /*
+┌──────────────────────────────────────────────────┐
+│ Node.js Event Loop - Active Listeners            │
+├──────────────────────────────────────────────────┤
+│                                                  │
+│  socket.on("data", callback) ← ACTIVE!           │
+│    │                                             │
+│    └─→ callback = function(chunk) {             │
+│           this._processBuffer(chunk); ← CLOSURE! │
+│        }                                         │
+│          │                                       │
+│          └─→ Closure holds references to:       │
+│              ├─ this (WebSocketServer instance) │
+│              ├─ socket (TCP Socket)             │
+│              └─ chunk (function parameter)      │
+│                                                  │
+└──────────────────────────────────────────────────┘
+
+WebSocketServer stays in memory BECAUSE the closure holds a reference to `this`
+*/
   }
 
   /**
@@ -508,53 +548,93 @@ export default class WebSocketServer extends EventEmitter {
     }
   }
 
+  /**
+   * Emits complete message event after all fragments received.
+   *
+   * When FIN=1 (final frame), this method:
+   * 1. Concatenates all accumulated fragments into single buffer
+   * 2. Emits "message" event with payload data for listeners
+   * 3. Resets parser state for next message
+   *
+   * Listeners can attach via: wsServer.on("message", (data) => {...})
+   *
+   * @private
+   */
   private _emmitDataEvent() {
+    // Combine all fragmented buffers into one complete message
     const fullMessageBuffer = Buffer.concat(this._fragments);
 
+    // Get total payload size in bytes
     const payloadLength = fullMessageBuffer.length;
 
+    // Emit "message" event to notify all listeners of incoming data
+    // This allows external code to handle the parsed message
     this.emit("message", {
-      data: fullMessageBuffer,
-      length: payloadLength,
-      timestamp: Date.now(),
+      data: fullMessageBuffer, // Complete unmasked message payload
+      length: payloadLength, // Size of payload in bytes
+      timestamp: Date.now(), // Timestamp when message was received
     });
 
     console.log(
       "WS Message succesfully parsed (all fragments received). Echo message back to the client.",
     );
-    // reset task loop as we finish to parse a full ws message
+
+    // Reset parser state to prepare for next message
     this._reset();
   }
 
+  /**
+   * Sends a WebSocket text message to the client.
+   *
+   * Constructs a proper RFC 6455 WebSocket frame with:
+   * - FIN bit set (complete message)
+   * - Text opcode (0x1)
+   * - No mask (server-to-client frames are unmasked)
+   * - Variable-length payload encoding
+   *
+   * @param message - String message to send to client
+   * @example
+   * wsServer.send("Hello, client!");
+   *
+   * @public
+   */
   public send(message: string) {
+    //  Convert string to UTF-8 buffer
     const fullMessageBuffer = Buffer.from(message, "utf-8");
 
+    //  Get payload size
     const payloadLength = fullMessageBuffer.length;
 
+    // Determine header size based on payload length
+    // RFC 6455: variable-length encoding for payload size
     let additionalPayloadSizeIndicator = null;
 
     switch (true) {
+      // Payload <= 125 bytes: size fits in second byte
       case payloadLength <= CONSTANTS.WS_DATA_FRAME_RULES.SMALL_DATA_SIZE:
         additionalPayloadSizeIndicator = 0;
         break;
+      // Payload 126-65535 bytes: need 2 extra bytes for size
       case payloadLength > CONSTANTS.WS_DATA_FRAME_RULES.SMALL_DATA_SIZE &&
         payloadLength <= CONSTANTS.WS_DATA_FRAME_RULES.MEDIUM_DATA_SIZE:
         additionalPayloadSizeIndicator =
           CONSTANTS.WS_DATA_FRAME_RULES.MEDIUM_SIZE_CONSUMPTION_BYTES;
         break;
+      // Payload > 65535 bytes: need 8 extra bytes for size
       default:
         additionalPayloadSizeIndicator =
           CONSTANTS.WS_DATA_FRAME_RULES.LARGE_SIZE_CONSUMPTION_BYTES;
         break;
     }
 
+    // Allocate frame buffer with total size needed
     const frame = Buffer.alloc(
       CONSTANTS.WS_DATA_FRAME_RULES.MIN_FRAME_SIZE +
         additionalPayloadSizeIndicator +
         payloadLength,
     );
 
-    // Construct First Byte
+    // Construct First Byte of frame header
     const fin = 0b1; // sau 0b00000001
     const rsv1 = 0b0; // sau 0b00000000
     const rsv2 = 0x00;
@@ -564,30 +644,33 @@ export default class WebSocketServer extends EventEmitter {
       (fin << 7) | (rsv1 << 6) | (rsv2 << 5) | (rsv3 << 4) | opcode;
     frame[0] = firstByte;
 
-    // Construct Payload Bytes Info
-    // mask bit 0 for server side
-    const maskBit = 0x00;
+    // Construct Second Byte: mask bit + payload length indicator
+    const maskBit = 0x00; // Server frames are NOT masked (RFC 6455)
 
     if (payloadLength <= CONSTANTS.WS_DATA_FRAME_RULES.SMALL_DATA_SIZE) {
       // JavaScript converts numbers to binary
       // Then performs the OR operation: 0b10000000 | 0b00110010 = 0b1011001
+      // Size fits directly in 7 bits of second byte
       frame[1] = maskBit | payloadLength;
     } else if (
       payloadLength <= CONSTANTS.WS_DATA_FRAME_RULES.MEDIUM_DATA_SIZE
     ) {
+      // Size requires 2 bytes: set indicator to 126, then write size at offset 2
       frame[1] = maskBit | CONSTANTS.WS_DATA_FRAME_RULES.MEDIUM_SIZE_DATA_FLAG;
       frame.writeUInt16BE(payloadLength, 2);
     } else {
+      // Size requires 8 bytes: set indicator to 127, then write size at offset 2
       frame[1] = maskBit | CONSTANTS.WS_DATA_FRAME_RULES.LARGE_SIZE_DATA_FLAG;
       frame.writeBigUInt64BE(BigInt(payloadLength), 2);
     }
 
-    // copy message into frame buffer
+    // Copy message payload into frame buffer at correct offset
     const messageStartOffset =
       CONSTANTS.WS_DATA_FRAME_RULES.MIN_FRAME_SIZE +
       additionalPayloadSizeIndicator;
     fullMessageBuffer.copy(frame, messageStartOffset);
 
+    // Send complete frame to client via TCP socket
     this._socket.write(frame);
   }
   /**
