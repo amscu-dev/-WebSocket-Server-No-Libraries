@@ -400,6 +400,19 @@ WebSocketServer stays in memory BECAUSE the closure holds a reference to `this`
       return;
     }
 
+    // control frames: FIN=1, payload <=125
+    if (this._isControlFrame(this._opcode)) {
+      if (!this._fin) {
+        this._sendClose(1002, "Control frames must not be fragmented");
+        return;
+      }
+
+      if (this._initialPayloadSizeIndicator > 125) {
+        this._sendClose(1002, "Control frame payload too large");
+        return;
+      }
+    }
+
     // Proceed to parse variable-length payload size field
     this._task = GET_LENGTH;
   }
@@ -774,6 +787,7 @@ WebSocketServer stays in memory BECAUSE the closure holds a reference to `this`
     this._totalPayloadLength = 0;
     this._framesReceived = 0;
     this._fragments = [];
+    this._mask = Buffer.alloc(CONSTANTS.WS_DATA_FRAME_RULES.MASK_KEY_LENGTH);
 
     // Don`t !!!
     // this._bufferedBytesLength = 0;
@@ -867,6 +881,14 @@ WebSocketServer stays in memory BECAUSE the closure holds a reference to `this`
     }
 
     return payloadBuffer;
+  }
+
+  private _isControlFrame(opcode: number) {
+    return [
+      CONSTANTS.WS_DATA_FRAME_RULES.OPCODE_CLOSE,
+      CONSTANTS.WS_DATA_FRAME_RULES.OPCODE_PING,
+      CONSTANTS.WS_DATA_FRAME_RULES.OPCODE_PONG,
+    ].includes(opcode);
   }
 
   /**
