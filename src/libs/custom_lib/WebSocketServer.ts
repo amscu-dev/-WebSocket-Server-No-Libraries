@@ -389,10 +389,17 @@ WebSocketServer stays in memory BECAUSE the closure holds a reference to `this`
     const secondByte = infoBuffer[1];
 
     // Extract frame metadata from header bytes
+    const rsvBits = firstByte & 0b01110000;
     this._fin = (firstByte & 0b10000000) === 0b10000000;
     this._opcode = firstByte & 0b00001111;
     this._masked = (secondByte & 0b10000000) === 0b10000000;
     this._initialPayloadSizeIndicator = secondByte & 0b01111111;
+
+    // No extensions allowed in current version
+    if (rsvBits !== 0) {
+      this._sendClose(1002, "RSV bits must be 0");
+      return;
+    }
 
     // Validate: RFC 6455 requires client frames to be masked
     if (!this._masked) {
