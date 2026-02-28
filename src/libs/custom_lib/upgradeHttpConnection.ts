@@ -5,7 +5,7 @@ import { Duplex } from "node:stream";
 
 import * as CONSTANTS from "@/libs/custom_lib/constants/constants";
 
-import WebSocketServer from "./wsServerLogic";
+import WebSocketServer from "./WebSocketServer";
 
 class UpgradeHeadersBuilder {
   private headers: Record<string, string> = {};
