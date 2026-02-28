@@ -1,3 +1,4 @@
+import { EventEmitter } from "node:events";
 import net from "node:net";
 
 import * as CONSTANTS from "@/libs/custom_lib/constants/constants";
@@ -7,7 +8,7 @@ const GET_INFO = 1;
 const GET_LENGTH = 2;
 const GET_MASK_KEY = 3;
 const GET_PAYLOAD = 4;
-const SEND_ECHO = 5;
+const EMMIT_DATA = 5;
 
 /**
  * WebSocketReceiver
@@ -24,7 +25,7 @@ const SEND_ECHO = 5;
  * @note Receiver instance is kept alive via closure and persists for the
  *       entire connection lifetime, accumulating chunks as they arrive.
  */
-export default class WebSocketServer {
+export default class WebSocketServer extends EventEmitter {
   /** TCP socket reference to the connected WebSocket client */
   private _socket: net.Socket;
 
@@ -60,7 +61,7 @@ export default class WebSocketServer {
    * - GET_LENGTH: Parse variable-length payload size field
    * - GET_MASK_KEY: Parse 4-byte XOR mask key
    * - GET_PAYLOAD: Extract and unmask actual frame payload
-   * - SEND_ECHO: Message complete, ready to send to client
+   * - EMMIT_DATA: Message complete, ready to send to client
    */
   private _task: number = GET_INFO;
 
@@ -161,7 +162,35 @@ export default class WebSocketServer {
    *                 entire connection lifetime.
    */
   constructor(socket: net.Socket) {
+    super();
     this._socket = socket;
+
+    // socket = TCP Communication Socket ( we can both read and write to it - its a full duplex )
+    // The Flow:
+    // 1. upgradeHttpConnection() - sends HTTP 101 response
+    // 2. startWebSocketConnection(socket) - attaches event listeners
+    // 3. startWebSocketConnection() TERMINATES
+    // 4. Socket remains in memory - Node.js maintains internal reference
+    // 5. When data arrives - callback executes automatically
+    this._socket.on("data", (chunk: Buffer) => {
+      console.log(
+        "Read another chunk of data from socket. TCP chunk length:",
+        chunk.length,
+      );
+      this._processBuffer(chunk);
+    });
+
+    this._socket.on("end", () => {
+      console.log("there will be no more data. The WS connection is closed.");
+    });
+
+    this._socket.on("error", (err) => {
+      console.error("socket error:", err);
+    });
+
+    this._socket.on("close", () => {
+      console.log("socket fully closed");
+    });
   }
 
   /**
@@ -178,7 +207,7 @@ export default class WebSocketServer {
    *   receiver.processBuffer(chunk);
    * });
    */
-  public processBuffer(chunk: Buffer) {
+  private _processBuffer(chunk: Buffer) {
     // Accumulate incoming bytes
     this._buffersArray.push(chunk);
     this._bufferedBytesLength += chunk.length;
@@ -195,7 +224,7 @@ export default class WebSocketServer {
    * back to event loop when more data needed. When next chunk arrives,
    * loop resumes from same task state.
    *
-   * Flow: GET_INFO → GET_LENGTH → GET_MASK_KEY → GET_PAYLOAD → (repeat or SEND_ECHO)
+   * Flow: GET_INFO → GET_LENGTH → GET_MASK_KEY → GET_PAYLOAD → (repeat or EMMIT_DATA)
    *
    * @private
    */
@@ -219,8 +248,8 @@ export default class WebSocketServer {
         case GET_PAYLOAD:
           this._getPayload();
           break;
-        case SEND_ECHO:
-          this._sendEcho();
+        case EMMIT_DATA:
+          this._emmitDataEvent();
           break;
       }
     } while (this._taskLoop);
@@ -425,7 +454,7 @@ export default class WebSocketServer {
    *    - FIN=0 (continuation): append to fragments, loop for next frame
    *    - FIN=1 (final): complete message, send to client
    *
-   * Transition: either back to GET_INFO (FIN=0) or to SEND_ECHO (FIN=1).
+   * Transition: either back to GET_INFO (FIN=0) or to EMMIT_DATA (FIN=1).
    *
    * @private
    */
@@ -475,12 +504,30 @@ export default class WebSocketServer {
     } else {
       // FIN=1: Message complete, send all accumulated fragments to client
 
-      this._task = SEND_ECHO;
+      this._task = EMMIT_DATA;
     }
   }
 
-  private _sendEcho() {
+  private _emmitDataEvent() {
     const fullMessageBuffer = Buffer.concat(this._fragments);
+
+    const payloadLength = fullMessageBuffer.length;
+
+    this.emit("message", {
+      data: fullMessageBuffer,
+      length: payloadLength,
+      timestamp: Date.now(),
+    });
+
+    console.log(
+      "WS Message succesfully parsed (all fragments received). Echo message back to the client.",
+    );
+    // reset task loop as we finish to parse a full ws message
+    this._reset();
+  }
+
+  public send(message: string) {
+    const fullMessageBuffer = Buffer.from(message, "utf-8");
 
     const payloadLength = fullMessageBuffer.length;
 
@@ -542,13 +589,7 @@ export default class WebSocketServer {
     fullMessageBuffer.copy(frame, messageStartOffset);
 
     this._socket.write(frame);
-    console.log(
-      "WS Message succesfully parsed (all fragments received). Echo message back to the client.",
-    );
-    // reset task loop as we finish to parse a full ws message
-    this._reset();
   }
-
   /**
    * Resets parser state after completing one WebSocket message.
    *
