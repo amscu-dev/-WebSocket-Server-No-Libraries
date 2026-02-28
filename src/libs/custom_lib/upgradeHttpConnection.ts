@@ -85,7 +85,7 @@ export function upgradeHttpConnection(
     `[ WS ] WebSocket Connection established. Client port: ${netSocket.remotePort}. Client IP: ${netSocket.remoteAddress}`,
   );
   // receiver its not garbage collected bcs of closure, and its must be the same unique receiver obj for an entire lifetime of an connection because of fragmentation of data
-  const receiver = new WebSocketServer(netSocket);
+  const receiver = new WebSocketServer({ socket: netSocket });
 
   receiver.on("message", (message) => {
     console.log(

@@ -11,6 +11,13 @@ const GET_PAYLOAD = 4;
 const EMMIT_DATA = 5;
 const GET_CLOSE_INFO = 6;
 
+type WebSocketServerOptions = {
+  socket: net.Socket;
+  maxPayload?: number;
+  headersMaxTimeout?: number;
+  payloadMaxTimeout?: number;
+};
+
 /**
  * WebSocketReceiver
  *
@@ -128,7 +135,7 @@ export default class WebSocketServer extends EventEmitter {
    * If _totalPayloadLength exceeds this, throw error and close connection.
    * Can be configured per instance if needed
    */
-  private _maxPayload: number = 1024 * 1024;
+  private _maxPayload: number;
 
   /**
    * 4-byte XOR mask key sent by client in every WebSocket frame.
@@ -155,6 +162,22 @@ export default class WebSocketServer extends EventEmitter {
    */
   private _fragments: Buffer[] = [];
 
+  // TODO Implement timeout mechanism for parsing headers & payload
+  /**
+   * Maximum time (ms) allowed to receive complete WebSocket frame header
+   * (FIN bit, opcode, mask bit, payload length indicator).
+   * Prevents slow-read attacks where client sends header bytes very slowly.
+   * If exceeded, close connection with error.
+   */
+  private _headersMaxTimeout: number;
+
+  /**
+   * Maximum time (ms) allowed to receive complete WebSocket frame payload data.
+   * Prevents slow client from exhausting server resources by sending payload slowly.
+   * If exceeded, close connection with error and free allocated buffers.
+   */
+  private _payloadMaxTimeout: number;
+
   /**
    * Initializes WebSocketReceiver with TCP socket reference.
    *
@@ -162,9 +185,19 @@ export default class WebSocketServer extends EventEmitter {
    *                 Socket is maintained in closure and persists for
    *                 entire connection lifetime.
    */
-  constructor(socket: net.Socket) {
+  constructor({
+    socket,
+    maxPayload = 1024 * 1024,
+    headersMaxTimeout = 30_000,
+    payloadMaxTimeout = 60_000,
+  }: WebSocketServerOptions) {
     super();
+
     this._socket = socket;
+    this._maxPayload = maxPayload;
+    this._headersMaxTimeout = headersMaxTimeout;
+    this._payloadMaxTimeout = payloadMaxTimeout;
+
     this._setupSocketListeners();
   }
 
@@ -199,13 +232,13 @@ export default class WebSocketServer extends EventEmitter {
     // CLOSURE: Captures `this`
     // Called when client sends FIN packet (graceful disconnect)
     this._socket.on("end", () => {
-      console.log("The WS connection is closed.");
+      console.log("The WebSocket Connection is closed.");
     });
 
     // CLOSURE: Captures `this`
     // Called if socket encounters an error - emit event and cleanup
-    this._socket.on("error", (err) => {
-      console.error("socket error:", err);
+    this._socket.on("error", (_err) => {
+      console.error("Socket error.");
     });
 
     // CLOSURE: Captures `this`
@@ -255,7 +288,24 @@ WebSocketServer stays in memory BECAUSE the closure holds a reference to `this`
     this._bufferedBytesLength += chunk.length;
 
     // Start processing & parsing bytes
-    this._startTaskLoop();
+    try {
+      this._startTaskLoop();
+    } catch (err) {
+      const error =
+        err instanceof Error
+          ? err
+          : new Error("Unknown WebSocket parser error");
+
+      console.error("WebSocket parser error:", error.message);
+
+      if (!this._socket.destroyed) {
+        try {
+          this._sendClose(1002, "Protocol error");
+        } catch {
+          this._socket.destroy();
+        }
+      }
+    }
   }
 
   /**
@@ -346,7 +396,8 @@ WebSocketServer stays in memory BECAUSE the closure holds a reference to `this`
 
     // Validate: RFC 6455 requires client frames to be masked
     if (!this._masked) {
-      throw new Error("Mask is not set by the client");
+      this._sendClose(1002, "Client frames must be masked");
+      return;
     }
 
     // Proceed to parse variable-length payload size field
@@ -446,7 +497,8 @@ WebSocketServer stays in memory BECAUSE the closure holds a reference to `this`
 
     // Security check: prevent memory exhaustion via oversized payloads
     if (this._totalPayloadLength > this._maxPayload) {
-      throw new Error("Data its too large!");
+      this._sendClose(1009, "Message too big");
+      return;
     }
 
     // Proceed to extract 4-byte mask key
@@ -536,8 +588,17 @@ WebSocketServer stays in memory BECAUSE the closure holds a reference to `this`
       return;
     }
 
-    // Check FIN bit to determine if message is complete
+    // *** HANDLE PING - PONG
+    if (
+      [
+        CONSTANTS.WS_DATA_FRAME_RULES.OPCODE_PING,
+        CONSTANTS.WS_DATA_FRAME_RULES.OPCODE_PONG,
+      ].includes(this._opcode!)
+    ) {
+      // TODO Handle Ping - Pong Process
+    }
     if (!this._fin) {
+      // Check FIN bit to determine if message is complete
       // FIN=0: More frames coming, loop back to parse next frame header
       this._task = GET_INFO;
     } else {
@@ -624,6 +685,16 @@ WebSocketServer stays in memory BECAUSE the closure holds a reference to `this`
       typeof serverResponse !== "undefined" && serverResponse
         ? serverResponse
         : "";
+
+    // Case for client terminate brute connection (browser refresh)
+    if (closeCode === 1001) {
+      this._socket.end();
+
+      this.emit("close", { code: closureCode, reason: closureReason });
+
+      this._taskLoop = false;
+      this._reset();
+    }
 
     // Convert reason string to UTF-8 buffer
     const closureReasonBuffer = Buffer.from(closureReason, "utf-8");
