@@ -88,7 +88,17 @@ export function upgradeHttpConnection(
   const receiver = new WebSocketServer(netSocket);
 
   receiver.on("message", (message) => {
-    console.log(`📨 Message:`, message.data.toString());
+    console.log(
+      "📨 Message:",
+      message.data.length > 20
+        ? message.data.slice(0, 20) + "..."
+        : message.data.toString(),
+    );
     receiver.send("Message received!");
+  });
+
+  receiver.on("close", (closureEvent) => {
+    console.log("=== WebSocket Connection Closed ===");
+    console.log(closureEvent);
   });
 }

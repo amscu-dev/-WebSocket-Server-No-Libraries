@@ -9,6 +9,7 @@ const GET_LENGTH = 2;
 const GET_MASK_KEY = 3;
 const GET_PAYLOAD = 4;
 const EMMIT_DATA = 5;
+const GET_CLOSE_INFO = 6;
 
 /**
  * WebSocketReceiver
@@ -184,8 +185,9 @@ export default class WebSocketServer extends EventEmitter {
    * @private
    */
   private _setupSocketListeners(): void {
-    // CLOSURE: Captures `this`, `socket`, `chunk`
+    // CLOSURE: Captures `this`
     // Called when client sends data - accumulate bytes and parse frames
+
     this._socket.on("data", (chunk: Buffer) => {
       console.log(
         "Read another chunk of data from socket. TCP chunk length:",
@@ -194,22 +196,22 @@ export default class WebSocketServer extends EventEmitter {
       this._processBuffer(chunk);
     });
 
-    // CLOSURE: Captures `this`, `socket`
+    // CLOSURE: Captures `this`
     // Called when client sends FIN packet (graceful disconnect)
     this._socket.on("end", () => {
-      console.log("there will be no more data. The WS connection is closed.");
+      console.log("The WS connection is closed.");
     });
 
-    // CLOSURE: Captures `this`, `socket`, `err`
+    // CLOSURE: Captures `this`
     // Called if socket encounters an error - emit event and cleanup
     this._socket.on("error", (err) => {
       console.error("socket error:", err);
     });
 
-    // CLOSURE: Captures `this`, `socket`
+    // CLOSURE: Captures `this`
     // Called when socket fully closed - all TCP resources freed
     this._socket.on("close", () => {
-      console.log("socket fully closed");
+      console.log("Socket is fully closed.");
     });
     /*
 ┌──────────────────────────────────────────────────┐
@@ -290,6 +292,9 @@ WebSocketServer stays in memory BECAUSE the closure holds a reference to `this`
           break;
         case EMMIT_DATA:
           this._emmitDataEvent();
+          break;
+        case GET_CLOSE_INFO:
+          this._getCloseInfo();
           break;
       }
     } while (this._taskLoop);
@@ -520,21 +525,15 @@ WebSocketServer stays in memory BECAUSE the closure holds a reference to `this`
       this._mask,
     );
 
-    // *** Handle CLOSE frame
-    if (this._opcode === CONSTANTS.WS_DATA_FRAME_RULES.OPCODE_CLOSE) {
-      // TODO: Implement close connection logic
-      return;
-    }
-
-    // *** Handle BINARY frame
-    if (this._opcode === CONSTANTS.WS_DATA_FRAME_RULES.OPCODE_BINARY) {
-      // TODO: Implement binary data handling
-      return;
-    }
-
     // *** Handle TEXT frame (or continuation)
     if (frameUnmaskedPayloadBuffer.length) {
       this._fragments.push(frameUnmaskedPayloadBuffer);
+    }
+
+    // *** Handle CLOSE frame
+    if (this._opcode === CONSTANTS.WS_DATA_FRAME_RULES.OPCODE_CLOSE) {
+      this._task = GET_CLOSE_INFO;
+      return;
     }
 
     // Check FIN bit to determine if message is complete
@@ -543,7 +542,6 @@ WebSocketServer stays in memory BECAUSE the closure holds a reference to `this`
       this._task = GET_INFO;
     } else {
       // FIN=1: Message complete, send all accumulated fragments to client
-
       this._task = EMMIT_DATA;
     }
   }
@@ -567,6 +565,9 @@ WebSocketServer stays in memory BECAUSE the closure holds a reference to `this`
     // Get total payload size in bytes
     const payloadLength = fullMessageBuffer.length;
 
+    console.log(
+      "WS Message succesfully parsed (all fragments received). Emmit data event.",
+    );
     // Emit "message" event to notify all listeners of incoming data
     // This allows external code to handle the parsed message
     this.emit("message", {
@@ -575,104 +576,100 @@ WebSocketServer stays in memory BECAUSE the closure holds a reference to `this`
       timestamp: Date.now(), // Timestamp when message was received
     });
 
-    console.log(
-      "WS Message succesfully parsed (all fragments received). Echo message back to the client.",
-    );
-
     // Reset parser state to prepare for next message
     this._reset();
   }
 
   /**
-   * Sends a WebSocket text message to the client.
-   *
-   * Constructs a proper RFC 6455 WebSocket frame with:
-   * - FIN bit set (complete message)
-   * - Text opcode (0x1)
-   * - No mask (server-to-client frames are unmasked)
-   * - Variable-length payload encoding
-   *
-   * @param message - String message to send to client
-   * @example
-   * wsServer.send("Hello, client!");
-   *
-   * @public
+   * Extracts close code and reason from the WebSocket close frame payload
+   * Control frames cannot be fragmented, so we expect all data in the first fragment
    */
-  public send(message: string) {
-    //  Convert string to UTF-8 buffer
-    const fullMessageBuffer = Buffer.from(message, "utf-8");
+  private _getCloseInfo() {
+    // Control Frames can't be fragmented.
+    const closeFramePayload = this._fragments[0];
 
-    //  Get payload size
-    const payloadLength = fullMessageBuffer.length;
-
-    // Determine header size based on payload length
-    // RFC 6455: variable-length encoding for payload size
-    let additionalPayloadSizeIndicator = null;
-
-    switch (true) {
-      // Payload <= 125 bytes: size fits in second byte
-      case payloadLength <= CONSTANTS.WS_DATA_FRAME_RULES.SMALL_DATA_SIZE:
-        additionalPayloadSizeIndicator = 0;
-        break;
-      // Payload 126-65535 bytes: need 2 extra bytes for size
-      case payloadLength > CONSTANTS.WS_DATA_FRAME_RULES.SMALL_DATA_SIZE &&
-        payloadLength <= CONSTANTS.WS_DATA_FRAME_RULES.MEDIUM_DATA_SIZE:
-        additionalPayloadSizeIndicator =
-          CONSTANTS.WS_DATA_FRAME_RULES.MEDIUM_SIZE_CONSUMPTION_BYTES;
-        break;
-      // Payload > 65535 bytes: need 8 extra bytes for size
-      default:
-        additionalPayloadSizeIndicator =
-          CONSTANTS.WS_DATA_FRAME_RULES.LARGE_SIZE_CONSUMPTION_BYTES;
-        break;
+    // If no close frame payload exists, send a generic close frame
+    if (!closeFramePayload) {
+      this._sendClose(1008, "Unknow reason.");
+      return;
     }
 
-    // Allocate frame buffer with total size needed
-    const frame = Buffer.alloc(
-      CONSTANTS.WS_DATA_FRAME_RULES.MIN_FRAME_SIZE +
-        additionalPayloadSizeIndicator +
-        payloadLength,
-    );
+    // Extract close code from the first 2 bytes of the payload (big-endian format)
+    const closeCode = closeFramePayload.readUInt16BE();
 
-    // Construct First Byte of frame header
-    const fin = 0b1; // sau 0b00000001
-    const rsv1 = 0b0; // sau 0b00000000
-    const rsv2 = 0x00;
-    const rsv3 = 0x00;
-    const opcode = CONSTANTS.WS_DATA_FRAME_RULES.OPCODE_TEXT;
-    const firstByte =
-      (fin << 7) | (rsv1 << 6) | (rsv2 << 5) | (rsv3 << 4) | opcode;
-    frame[0] = firstByte;
+    // Extract close reason from the remaining bytes (utf-8 encoded string)
+    const closeReason = closeFramePayload.toString("utf-8", 2);
 
-    // Construct Second Byte: mask bit + payload length indicator
-    const maskBit = 0x00; // Server frames are NOT masked (RFC 6455)
+    const serverResponse = `Received close frame with code: ${closeCode} and reason: ${closeReason}.`;
 
-    if (payloadLength <= CONSTANTS.WS_DATA_FRAME_RULES.SMALL_DATA_SIZE) {
-      // JavaScript converts numbers to binary
-      // Then performs the OR operation: 0b10000000 | 0b00110010 = 0b1011001
-      // Size fits directly in 7 bits of second byte
-      frame[1] = maskBit | payloadLength;
-    } else if (
-      payloadLength <= CONSTANTS.WS_DATA_FRAME_RULES.MEDIUM_DATA_SIZE
-    ) {
-      // Size requires 2 bytes: set indicator to 126, then write size at offset 2
-      frame[1] = maskBit | CONSTANTS.WS_DATA_FRAME_RULES.MEDIUM_SIZE_DATA_FLAG;
-      frame.writeUInt16BE(payloadLength, 2);
-    } else {
-      // Size requires 8 bytes: set indicator to 127, then write size at offset 2
-      frame[1] = maskBit | CONSTANTS.WS_DATA_FRAME_RULES.LARGE_SIZE_DATA_FLAG;
-      frame.writeBigUInt64BE(BigInt(payloadLength), 2);
-    }
+    console.log(serverResponse);
 
-    // Copy message payload into frame buffer at correct offset
-    const messageStartOffset =
-      CONSTANTS.WS_DATA_FRAME_RULES.MIN_FRAME_SIZE +
-      additionalPayloadSizeIndicator;
-    fullMessageBuffer.copy(frame, messageStartOffset);
-
-    // Send complete frame to client via TCP socket
-    this._socket.write(frame);
+    // Send close frame back to client and emit close event
+    this._sendClose(closeCode, serverResponse);
   }
+
+  /**
+   * Constructs and sends a WebSocket close frame to the client
+   * Follows RFC 6455 format for close frames (opcode 0x8)
+   * @param closeCode - WebSocket close status code (default: 1000 for normal closure)
+   * @param serverResponse - Reason text for the closure
+   */
+  private _sendClose(closeCode: number, serverResponse: string) {
+    // Determine closure code - use 1000 (normal closure) if not provided or invalid
+    const closureCode =
+      typeof closeCode !== "undefined" && closeCode ? closeCode : 1000;
+
+    // Determine closure reason - use empty string if not provided
+    const closureReason =
+      typeof serverResponse !== "undefined" && serverResponse
+        ? serverResponse
+        : "";
+
+    // Convert reason string to UTF-8 buffer
+    const closureReasonBuffer = Buffer.from(closureReason, "utf-8");
+    const closureReasonLength = closureReasonBuffer.length;
+
+    // Allocate buffer: 2 bytes for code + reason length
+    const closeFramePayload = Buffer.alloc(2 + closureReasonLength);
+
+    // Write close code in big-endian format at the start of payload
+    closeFramePayload.writeUInt16BE(closureCode);
+
+    // Copy reason string after the close code
+    closureReasonBuffer.copy(closeFramePayload, 2);
+
+    // === WebSocket Frame Header Construction ===
+    // First byte: FIN bit + RSV bits + Opcode
+    const finBit = 0b10000000; // 1 = final fragment
+    const rsvBits = 0b00000000; // Reserved bits (must be 0)
+    const opcodeBits = 0b00001000; // 0x8 = Close frame opcode
+    const firstByte = finBit | rsvBits | opcodeBits;
+
+    // Second byte: MASK bit + Payload length
+    const maskBit = 0b00000000; // 0 = no masking (server doesn't mask)
+    const payloadLength = closeFramePayload.length;
+    const secondByte = maskBit | payloadLength;
+
+    // Combine header bytes
+    const mandatoryCloseHeaders = Buffer.from([firstByte, secondByte]);
+
+    // Concatenate headers with payload to create complete close frame
+    const closeFrame = Buffer.concat([
+      mandatoryCloseHeaders,
+      closeFramePayload,
+    ]);
+
+    // Send close frame to client
+    this._socket.write(closeFrame);
+    // End TCP Connection
+    this._socket.end();
+
+    this.emit("close", { code: closureCode, reason: closureReason });
+
+    this._taskLoop = false;
+    this._reset();
+  }
+
   /**
    * Resets parser state after completing one WebSocket message.
    *
@@ -799,5 +796,96 @@ WebSocketServer stays in memory BECAUSE the closure holds a reference to `this`
     }
 
     return payloadBuffer;
+  }
+
+  /**
+   * Sends a WebSocket text message to the client.
+   *
+   * Constructs a proper RFC 6455 WebSocket frame with:
+   * - FIN bit set (complete message)
+   * - Text opcode (0x1)
+   * - No mask (server-to-client frames are unmasked)
+   * - Variable-length payload encoding
+   *
+   * @param message - String message to send to client
+   * @example
+   * wsServer.send("Hello, client!");
+   *
+   * @public
+   */
+  public send(message: string) {
+    //  Convert string to UTF-8 buffer
+    const fullMessageBuffer = Buffer.from(message, "utf-8");
+
+    //  Get payload size
+    const payloadLength = fullMessageBuffer.length;
+
+    // Determine header size based on payload length
+    // RFC 6455: variable-length encoding for payload size
+    let additionalPayloadSizeIndicator = null;
+
+    switch (true) {
+      // Payload <= 125 bytes: size fits in second byte
+      case payloadLength <= CONSTANTS.WS_DATA_FRAME_RULES.SMALL_DATA_SIZE:
+        additionalPayloadSizeIndicator = 0;
+        break;
+      // Payload 126-65535 bytes: need 2 extra bytes for size
+      case payloadLength > CONSTANTS.WS_DATA_FRAME_RULES.SMALL_DATA_SIZE &&
+        payloadLength <= CONSTANTS.WS_DATA_FRAME_RULES.MEDIUM_DATA_SIZE:
+        additionalPayloadSizeIndicator =
+          CONSTANTS.WS_DATA_FRAME_RULES.MEDIUM_SIZE_CONSUMPTION_BYTES;
+        break;
+      // Payload > 65535 bytes: need 8 extra bytes for size
+      default:
+        additionalPayloadSizeIndicator =
+          CONSTANTS.WS_DATA_FRAME_RULES.LARGE_SIZE_CONSUMPTION_BYTES;
+        break;
+    }
+
+    // Allocate frame buffer with total size needed
+    const frame = Buffer.alloc(
+      CONSTANTS.WS_DATA_FRAME_RULES.MIN_FRAME_SIZE +
+        additionalPayloadSizeIndicator +
+        payloadLength,
+    );
+
+    // Construct First Byte of frame header
+    const fin = 0b1; // sau 0b00000001
+    const rsv1 = 0b0; // sau 0b00000000
+    const rsv2 = 0x00;
+    const rsv3 = 0x00;
+    const opcode = CONSTANTS.WS_DATA_FRAME_RULES.OPCODE_TEXT;
+    const firstByte =
+      (fin << 7) | (rsv1 << 6) | (rsv2 << 5) | (rsv3 << 4) | opcode;
+    frame[0] = firstByte;
+
+    // Construct Second Byte: mask bit + payload length indicator
+    const maskBit = 0x00; // Server frames are NOT masked (RFC 6455)
+
+    if (payloadLength <= CONSTANTS.WS_DATA_FRAME_RULES.SMALL_DATA_SIZE) {
+      // JavaScript converts numbers to binary
+      // Then performs the OR operation: 0b10000000 | 0b00110010 = 0b1011001
+      // Size fits directly in 7 bits of second byte
+      frame[1] = maskBit | payloadLength;
+    } else if (
+      payloadLength <= CONSTANTS.WS_DATA_FRAME_RULES.MEDIUM_DATA_SIZE
+    ) {
+      // Size requires 2 bytes: set indicator to 126, then write size at offset 2
+      frame[1] = maskBit | CONSTANTS.WS_DATA_FRAME_RULES.MEDIUM_SIZE_DATA_FLAG;
+      frame.writeUInt16BE(payloadLength, 2);
+    } else {
+      // Size requires 8 bytes: set indicator to 127, then write size at offset 2
+      frame[1] = maskBit | CONSTANTS.WS_DATA_FRAME_RULES.LARGE_SIZE_DATA_FLAG;
+      frame.writeBigUInt64BE(BigInt(payloadLength), 2);
+    }
+
+    // Copy message payload into frame buffer at correct offset
+    const messageStartOffset =
+      CONSTANTS.WS_DATA_FRAME_RULES.MIN_FRAME_SIZE +
+      additionalPayloadSizeIndicator;
+    fullMessageBuffer.copy(frame, messageStartOffset);
+
+    // Send complete frame to client via TCP socket
+    this._socket.write(frame);
   }
 }
