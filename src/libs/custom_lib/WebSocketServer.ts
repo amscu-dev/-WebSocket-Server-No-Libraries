@@ -643,9 +643,6 @@ WebSocketServer stays in memory BECAUSE the closure holds a reference to `this`
     // Combine all fragmented buffers into one complete message
     const fullMessageBuffer = Buffer.concat(this._fragments);
 
-    // Get total payload size in bytes
-    const payloadLength = fullMessageBuffer.length;
-
     console.log(
       "WS Message succesfully parsed (all fragments received). Emmit data event.",
     );
@@ -653,7 +650,7 @@ WebSocketServer stays in memory BECAUSE the closure holds a reference to `this`
     // This allows external code to handle the parsed message
     this.emit("message", {
       data: fullMessageBuffer, // Complete unmasked message payload
-      length: payloadLength, // Size of payload in bytes
+      length: fullMessageBuffer.length, // Size of payload in bytes
       timestamp: Date.now(), // Timestamp when message was received
     });
 
