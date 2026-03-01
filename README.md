@@ -6,6 +6,8 @@
 
 - **Incremental TCP Chunk Parsing with Custom Reusable Logic** - Implement `_consume()` method to handle fragmented TCP data arriving unpredictably, enabling parsing of WebSocket frames that span multiple TCP segments or bundled together in one segment
 
+![Multiple WS Messages in Single TCP Chunk](docs/1-chunk-multiple-ws-messages.png)
+
 - **Binary Data Manipulation & Interpretation** - Working directly with bytes: bitwise operations for extracting FIN/opcode/mask bits, big-endian decoding, and XOR-based unmasking (`_getInfo()`, `_unmaskDataPayload()`)
 
 - **Deep WebSocket Protocol Understanding via Binary Frame Construction** - Hand-craft WebSocket frames in binary format exactly as transmitted over the wire, understanding why each bit and byte is positioned as it is (`send()` method, frame header assembly)
@@ -29,8 +31,6 @@
 - **Client Masking Validation & Payload Unmasking** - Enforce RFC requirement that all client-to-server frames must be XOR-masked, validate mask presence, and correctly unmask payload by XORing with 4-byte cyclic key (`_masked` validation, `_unmaskDataPayload()`)
 
 - **Multiple WebSocket Messages in Single TCP Chunk** - Design buffer management that preserves unconsumed data after processing complete message, enabling parser to immediately start next message without loss (`_reset()` intentionally excludes `_buffersArray` reset)
-
-![Multiple WS Messages in Single TCP Chunk](docs/1-chunk-multiple-ws-messages.png)
 
 - **Payload Size Security Limits** - Implement maximum payload enforcement to prevent memory exhaustion and DoS attacks, tracking cumulative size across fragmented messages and rejecting oversized payloads with proper close code (`_maxPayload`, `_processLength()`)
 
