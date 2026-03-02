@@ -44,22 +44,15 @@ httpServer.listen(CONFIG.PORT, CONFIG.HOST, () => {
 const ws = new WebSocketServer({ httpServer });
 
 ws.on("connection", (connection) => {
-  connection.on(
-    "message",
-    (message: {
-      data: Buffer<ArrayBuffer>;
-      length: number;
-      timestamp: number;
-    }) => {
-      console.log(
-        "📨 Message:",
-        message.data.length > 20
-          ? message.data.slice(0, 20) + "..."
-          : message.data.toString(),
-      );
-      connection.send("Message received!");
-    },
-  );
+  connection.on("message", (message) => {
+    console.log(
+      "📨 Message:",
+      message.data.length > 20
+        ? message.data.slice(0, 20) + "..."
+        : message.data.toString(),
+    );
+    connection.send("Message received!");
+  });
 
   connection.on("close", (closureEvent: { code: number; reason: string }) => {
     console.log("=== Webconnection Connection Closed ===");

@@ -34,7 +34,7 @@ type CloseEvent = {
 
 /** evenimentele conexiunii (WebSocketParser) */
 type ConnectionEvents = {
-  data: [message: ParsedMessage];
+  message: [message: ParsedMessage];
   close: [event: CloseEvent];
 };
 
