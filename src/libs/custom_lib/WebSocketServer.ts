@@ -62,7 +62,10 @@ export default class WebSocketServer extends EventEmitter {
 
   private _startWebSocketServer(httpServer: http.Server) {
     httpServer.on("upgrade", (request, socket) => {
-      this._validateHttpUpgradeRequest(request, socket);
+      const valid = this._validateHttpUpgradeRequest(request, socket);
+      if (!valid) {
+        return;
+      }
       this._upgradeHttpConnection(request, socket);
     });
   }
@@ -80,8 +83,9 @@ export default class WebSocketServer extends EventEmitter {
         400,
         "The HTTP headers do not comply with the RFC6455 spec.",
       );
-      return;
+      return false;
     }
+    return true;
   }
 
   private _upgradeHttpConnection(
