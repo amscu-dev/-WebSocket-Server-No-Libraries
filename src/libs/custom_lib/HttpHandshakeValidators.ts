@@ -1,6 +1,11 @@
 import http from "node:http";
 
-import { UpgradeConfig } from "./constants/constants";
+export interface UpgradeConfig {
+  allowedOrigins: string[];
+  upgradeHeader: string;
+  connectionHeader: string;
+  method: string;
+}
 
 interface ValidationResult {
   isValid: boolean;

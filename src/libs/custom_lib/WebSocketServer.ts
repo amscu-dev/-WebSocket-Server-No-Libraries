@@ -1,9 +1,6 @@
 import { EventEmitter } from "node:events";
 import http from "node:http";
 import net from "node:net";
-import { Duplex } from "node:stream";
-
-import * as CONSTANTS from "@/libs/custom_lib/constants/constants";
 
 import {
   RequestValidator,
@@ -15,6 +12,7 @@ import WebSocketParser from "./WebSocketParser";
 
 type WebSocketServerOptions = {
   httpServer: http.Server;
+  allowedOrigins?: string[];
   maxPayload?: number;
   headersMaxTimeout?: number;
   payloadMaxTimeout?: number;
@@ -47,6 +45,11 @@ export default class WebSocketServer extends EventEmitter<ServerEvents> {
    */
   private _maxPayload: number;
 
+  private _upgradeHeader: string = "websocket";
+  private _connectionHeader: string = "upgrade";
+  private _upgradeMethod: string = "GET";
+  private _allowedOrigins: string[];
+
   private _upgradeRequestValidator: RequestValidator;
 
   constructor({
@@ -54,18 +57,20 @@ export default class WebSocketServer extends EventEmitter<ServerEvents> {
     maxPayload = 1024 * 1024,
     headersMaxTimeout = 30_000,
     payloadMaxTimeout = 60_000,
+    allowedOrigins = ["http://127.0.0.1:5500", "http://localhost:5500"],
   }: WebSocketServerOptions) {
     super();
     this._maxPayload = maxPayload;
     this._headersMaxTimeout = headersMaxTimeout;
     this._payloadMaxTimeout = payloadMaxTimeout;
+    this._allowedOrigins = allowedOrigins;
 
     this._upgradeRequestValidator = this._createHttpValidator();
     this._startWebSocketServer(httpServer);
   }
 
   private _startWebSocketServer(httpServer: http.Server) {
-    httpServer.on("upgrade", (request, socket) => {
+    httpServer.on("upgrade", (request, socket: net.Socket) => {
       const valid = this._validateHttpUpgradeRequest(request, socket);
       if (!valid) {
         return;
@@ -76,7 +81,7 @@ export default class WebSocketServer extends EventEmitter<ServerEvents> {
 
   private _validateHttpUpgradeRequest(
     request: http.IncomingMessage,
-    socket: Duplex,
+    socket: net.Socket,
   ) {
     // Parsing required client request headers in conformity with https://www.rfc-editor.org/rfc/rfc6455.html#section-4.1
     const validationResult = this._upgradeRequestValidator.validate(request);
@@ -92,11 +97,15 @@ export default class WebSocketServer extends EventEmitter<ServerEvents> {
     return true;
   }
 
+  /**
+  The socket is still the same underlying TCP connection, but after the upgrade, it is no longer managed by the HTTP request parser. The HTTP protocol handling steps aside, and the WebSocket protocol takes over. 
+  After the upgrade event, the HTTP parser no longer acts on that socket. Any new bytes arriving on it are not interpreted as HTTP anymore; they are now handled by your WebSocket implementation.
+  Nodejs Docs: After this event is emitted, the request's socket will not have a 'data' event listener, meaning it will need to be bound in order to handle data sent to the server on that socket.
+   */
   private _upgradeHttpConnection(
     request: http.IncomingMessage,
-    socket: Duplex,
+    socket: net.Socket,
   ) {
-    const netSocket = socket! as net.Socket;
     const headers = new UpgradeHeadersBuilder(request).build();
 
     const response = new HttpResponseBuilder(headers)
@@ -106,12 +115,12 @@ export default class WebSocketServer extends EventEmitter<ServerEvents> {
     // WEBSOCKET SERVER LOGIC
     // code below will relate to our custom websocket server
     console.log(
-      `[ WS ] WebSocket Connection established. Client port: ${netSocket.remotePort}. Client IP: ${netSocket.remoteAddress}`,
+      `[ WS ] WebSocket Connection established. Client port: ${socket.remotePort}. Client IP: ${socket.remoteAddress}`,
     );
 
     // receiver its not garbage collected bcs of closure, and its must be the same unique receiver obj for an entire lifetime of an connection because of fragmentation of data
     const receiver = new WebSocketParser({
-      socket: netSocket,
+      socket,
       maxPayload: this._maxPayload,
       headersMaxTimeout: this._headersMaxTimeout,
       payloadMaxTimeout: this._payloadMaxTimeout,
@@ -119,11 +128,11 @@ export default class WebSocketServer extends EventEmitter<ServerEvents> {
 
     this.emit("connection", receiver);
 
-    netSocket.write(response);
+    socket.write(response);
   }
 
   private _sendUpgradeErrorResponse(
-    socket: Duplex,
+    socket: net.Socket,
     statusCode: number,
     message: string,
   ): void {
@@ -140,6 +149,12 @@ export default class WebSocketServer extends EventEmitter<ServerEvents> {
   }
 
   private _createHttpValidator() {
-    return UpgradeValidatorFactory.createValidator(CONSTANTS.upgradeConfig);
+    const upgradeConfig = {
+      upgradeHeader: this._upgradeHeader,
+      connectionHeader: this._connectionHeader,
+      method: this._upgradeMethod,
+      allowedOrigins: this._allowedOrigins,
+    };
+    return UpgradeValidatorFactory.createValidator(upgradeConfig);
   }
 }
