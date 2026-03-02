@@ -8,19 +8,11 @@ import chalk from "chalk";
 import CONFIG from "@/config/app.config";
 import * as CONSTANTS from "@/libs/custom_lib/constants/constants";
 
-import { upgradeHttpConnection } from "./libs/custom_lib/upgradeHttpConnection";
-import {
-  sendUpgradeErrorResponse,
-  UpgradeValidatorFactory,
-} from "./libs/custom_lib/validateHttpHandshake";
+import WebSocketServer from "./libs/custom_lib/WebSocketServer";
 import handleProcessErrors from "./utils/handleProcessErrors";
 
 console.log(
   chalk.green.bold("[ NODE ] Finished loading all files in index.ts"),
-);
-
-const upgradeValidator = UpgradeValidatorFactory.createValidator(
-  CONSTANTS.upgradeConfig,
 );
 
 // create a HTTP wev-server object
@@ -49,19 +41,30 @@ httpServer.listen(CONFIG.PORT, CONFIG.HOST, () => {
 // handle inital http handshake in order to establish a ws connection
 // Docs: https://nodejs.org/docs/latest/api/http.html#event-upgrade_1
 
-httpServer.on("upgrade", (request, socket) => {
-  // Parsing required client request headers in conformity with https://www.rfc-editor.org/rfc/rfc6455.html#section-4.1
-  const validationResult = upgradeValidator.validate(request);
-  // https://www.rfc-editor.org/rfc/rfc6455.html#section-4.2.1
-  if (!validationResult.isValid) {
-    sendUpgradeErrorResponse(
-      socket,
-      400,
-      "The HTTP headers do not comply with the RFC6455 spec.",
-    );
-    return;
-  }
-  upgradeHttpConnection(request, socket);
+const ws = new WebSocketServer({ httpServer });
+
+ws.on("connection", (socket) => {
+  socket.on(
+    "message",
+    (message: {
+      data: Buffer<ArrayBuffer>;
+      length: number;
+      timestamp: number;
+    }) => {
+      console.log(
+        "📨 Message:",
+        message.data.length > 20
+          ? message.data.slice(0, 20) + "..."
+          : message.data.toString(),
+      );
+      socket.send("Message received!");
+    },
+  );
+
+  socket.on("close", (closureEvent: { code: number; reason: string }) => {
+    console.log("=== WebSocket Connection Closed ===");
+    console.log(closureEvent);
+  });
 });
 
 // implement basic error handling
