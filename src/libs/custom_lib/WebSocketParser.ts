@@ -4,12 +4,14 @@ import net from "node:net";
 import * as CONSTANTS from "@/libs/custom_lib/constants/constants";
 
 // define loop engine variables
-const GET_INFO = 1;
-const GET_LENGTH = 2;
-const GET_MASK_KEY = 3;
-const GET_PAYLOAD = 4;
-const EMMIT_DATA = 5;
-const GET_CLOSE_INFO = 6;
+const STATE = {
+  GET_INFO: 1,
+  GET_LENGTH: 2,
+  GET_MASK_KEY: 3,
+  GET_PAYLOAD: 4,
+  EMIT_DATA: 5,
+  GET_CLOSE_INFO: 6,
+};
 
 type WebSocketParserOptions = {
   socket: net.Socket;
@@ -69,9 +71,9 @@ export default class WebSocketParser extends EventEmitter {
    * - GET_LENGTH: Parse variable-length payload size field
    * - GET_MASK_KEY: Parse 4-byte XOR mask key
    * - GET_PAYLOAD: Extract and unmask actual frame payload
-   * - EMMIT_DATA: Message complete, ready to send to client
+   * - EMIT_DATA: Message complete, ready to send to client
    */
-  private _task: number = GET_INFO;
+  private _task: number = STATE.GET_INFO;
 
   /**
    * FIN bit (Frame Final flag) extracted from RFC 6455 first byte (bit 0).
@@ -316,7 +318,7 @@ WebSocketParser stays in memory BECAUSE the closure holds a reference to `this`
    * back to event loop when more data needed. When next chunk arrives,
    * loop resumes from same task state.
    *
-   * Flow: GET_INFO → GET_LENGTH → GET_MASK_KEY → GET_PAYLOAD → (repeat or EMMIT_DATA)
+   * Flow: GET_INFO → GET_LENGTH → GET_MASK_KEY → GET_PAYLOAD → (repeat or EMIT_DATA)
    *
    * @private
    */
@@ -328,22 +330,22 @@ WebSocketParser stays in memory BECAUSE the closure holds a reference to `this`
     );
     do {
       switch (this._task) {
-        case GET_INFO:
+        case STATE.GET_INFO:
           this._getInfo();
           break;
-        case GET_LENGTH:
+        case STATE.GET_LENGTH:
           this._getLength();
           break;
-        case GET_MASK_KEY:
+        case STATE.GET_MASK_KEY:
           this._getMaskKey();
           break;
-        case GET_PAYLOAD:
+        case STATE.GET_PAYLOAD:
           this._getPayload();
           break;
-        case EMMIT_DATA:
+        case STATE.EMIT_DATA:
           this._emmitDataEvent();
           break;
-        case GET_CLOSE_INFO:
+        case STATE.GET_CLOSE_INFO:
           this._getCloseInfo();
           break;
       }
@@ -421,7 +423,7 @@ WebSocketParser stays in memory BECAUSE the closure holds a reference to `this`
     }
 
     // Proceed to parse variable-length payload size field
-    this._task = GET_LENGTH;
+    this._task = STATE.GET_LENGTH;
   }
 
   /**
@@ -522,7 +524,7 @@ WebSocketParser stays in memory BECAUSE the closure holds a reference to `this`
     }
 
     // Proceed to extract 4-byte mask key
-    this._task = GET_MASK_KEY;
+    this._task = STATE.GET_MASK_KEY;
   }
 
   /**
@@ -556,7 +558,7 @@ WebSocketParser stays in memory BECAUSE the closure holds a reference to `this`
     this._mask = maskeyHeader;
 
     // Proceed to extract and unmask payload data
-    this._task = GET_PAYLOAD;
+    this._task = STATE.GET_PAYLOAD;
   }
 
   /**
@@ -571,7 +573,7 @@ WebSocketParser stays in memory BECAUSE the closure holds a reference to `this`
    *    - FIN=0 (continuation): append to fragments, loop for next frame
    *    - FIN=1 (final): complete message, send to client
    *
-   * Transition: either back to GET_INFO (FIN=0) or to EMMIT_DATA (FIN=1).
+   * Transition: either back to GET_INFO (FIN=0) or to EMIT_DATA (FIN=1).
    *
    * @private
    */
@@ -604,7 +606,7 @@ WebSocketParser stays in memory BECAUSE the closure holds a reference to `this`
 
     // *** Handle CLOSE frame
     if (this._opcode === CONSTANTS.WS_DATA_FRAME_RULES.OPCODE_CLOSE) {
-      this._task = GET_CLOSE_INFO;
+      this._task = STATE.GET_CLOSE_INFO;
       return;
     }
 
@@ -620,10 +622,10 @@ WebSocketParser stays in memory BECAUSE the closure holds a reference to `this`
     if (!this._fin) {
       // Check FIN bit to determine if message is complete
       // FIN=0: More frames coming, loop back to parse next frame header
-      this._task = GET_INFO;
+      this._task = STATE.GET_INFO;
     } else {
       // FIN=1: Message complete, send all accumulated fragments to client
-      this._task = EMMIT_DATA;
+      this._task = STATE.EMIT_DATA;
     }
   }
 
@@ -783,7 +785,7 @@ WebSocketParser stays in memory BECAUSE the closure holds a reference to `this`
    */
   private _reset() {
     // Reset current frame/message state
-    this._task = GET_INFO;
+    this._task = STATE.GET_INFO;
     this._fin = false;
     this._opcode = null;
     this._masked = false;

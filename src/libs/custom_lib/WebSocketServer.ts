@@ -99,8 +99,6 @@ export default class WebSocketServer extends EventEmitter {
       .setStatus(101, "Switching Protocols")
       .build();
 
-    netSocket.write(response);
-
     // WEBSOCKET SERVER LOGIC
     // code below will relate to our custom websocket server
     console.log(
@@ -116,6 +114,8 @@ export default class WebSocketServer extends EventEmitter {
     });
 
     this.emit("connection", receiver);
+
+    netSocket.write(response);
   }
 
   private _sendUpgradeErrorResponse(

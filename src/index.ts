@@ -43,8 +43,8 @@ httpServer.listen(CONFIG.PORT, CONFIG.HOST, () => {
 
 const ws = new WebSocketServer({ httpServer });
 
-ws.on("connection", (socket) => {
-  socket.on(
+ws.on("connection", (connection) => {
+  connection.on(
     "message",
     (message: {
       data: Buffer<ArrayBuffer>;
@@ -57,12 +57,12 @@ ws.on("connection", (socket) => {
           ? message.data.slice(0, 20) + "..."
           : message.data.toString(),
       );
-      socket.send("Message received!");
+      connection.send("Message received!");
     },
   );
 
-  socket.on("close", (closureEvent: { code: number; reason: string }) => {
-    console.log("=== WebSocket Connection Closed ===");
+  connection.on("close", (closureEvent: { code: number; reason: string }) => {
+    console.log("=== Webconnection Connection Closed ===");
     console.log(closureEvent);
   });
 });
@@ -82,3 +82,9 @@ process.nextTick(() => {
     ),
   );
 });
+
+// setInterval(() => {
+//   const used = process.memoryUsage();
+//   const memory = used.heapUsed / 1024 / 1024;
+//   console.log(`Heap: ${memory.toFixed(4)} MB`);
+// }, 1000);
