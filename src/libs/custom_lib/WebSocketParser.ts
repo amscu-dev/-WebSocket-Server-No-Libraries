@@ -20,6 +20,24 @@ type WebSocketParserOptions = {
   payloadMaxTimeout?: number;
 };
 
+/** payload-uri */
+type ParsedMessage = {
+  data: Buffer;
+  length: number;
+  timestamp: number;
+};
+
+type CloseEvent = {
+  code: number;
+  reason: string;
+};
+
+/** evenimentele conexiunii (WebSocketParser) */
+type ConnectionEvents = {
+  data: [message: ParsedMessage];
+  close: [event: CloseEvent];
+};
+
 /**
  * WebSocketReceiver
  *
@@ -35,7 +53,7 @@ type WebSocketParserOptions = {
  * @note Receiver instance is kept alive via closure and persists for the
  *       entire connection lifetime, accumulating chunks as they arrive.
  */
-export default class WebSocketParser extends EventEmitter {
+export default class WebSocketParser extends EventEmitter<ConnectionEvents> {
   /** TCP socket reference to the connected WebSocket client */
   private _socket: net.Socket;
 

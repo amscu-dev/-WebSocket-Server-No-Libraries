@@ -20,7 +20,11 @@ type WebSocketServerOptions = {
   payloadMaxTimeout?: number;
 };
 
-export default class WebSocketServer extends EventEmitter {
+type ServerEvents = {
+  connection: [connection: WebSocketParser];
+};
+
+export default class WebSocketServer extends EventEmitter<ServerEvents> {
   /**
    * Maximum time (ms) allowed to receive complete WebSocket frame header
    * (FIN bit, opcode, mask bit, payload length indicator).
